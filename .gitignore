@@ -1,0 +1,49 @@
+# Sensitive / credentials
+config.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+# CLI compiled binary
+CLI/*/clitool
+
+# Compiled binaries
+AudioFolders
+nvdaControllerClient.dll
+
+# Media files
+*.mp3
+*.wav
+*.flac
+*.ogg
+
+# Vosk speech model (large, consider git LFS if needed)
+vosk-model-small-en-us-0.15/
+
+# Channel data / user state
+*.json
+.channel_backups/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Downloads
+Downloads/
+
+# Tools (binaries)
+tools/
+
+# Installer
+install.bat
