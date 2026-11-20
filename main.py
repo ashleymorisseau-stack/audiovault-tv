@@ -7,6 +7,7 @@ print("Loading standard libs...", flush=True)
 import os
 import json
 import threading
+import subprocess
 from pathlib import Path
 
 print("Loading audio player...", flush=True)
@@ -30,6 +31,15 @@ except ImportError:
     YT_AVAILABLE = False
     print("  YouTube client not available")
 
+print("Loading Live TV client...", flush=True)
+try:
+    import livetv_client as livetv
+    LIVETV_AVAILABLE = True
+except ImportError:
+    livetv = None
+    LIVETV_AVAILABLE = False
+    print("  Live TV client not available")
+
 print(f"[{time.strftime('%H:%M:%S')}] All modules loaded.", flush=True)
 
 # NVDA integration
@@ -52,6 +62,12 @@ def speak(text):
         except Exception:
             pass
 
+
+class _YTDownloadCancelled(Exception):
+    """Raised inside the download progress callback to abort a YouTube download."""
+    pass
+
+
 class PlayerFrame(wx.Frame):
     def __init__(self):
         import time
@@ -63,7 +79,7 @@ class PlayerFrame(wx.Frame):
         
         self.player = AudioPlayer()
         self.playlist = PlaylistManager()
-        self.channels = ChannelManager(Path.home() / ".mp3_player_channels.json")
+        self.channels = ChannelManager(Path.home() / ".mp3_player_channels.json", logger=self.logger)
         
         t1 = time.time()
         self.logger.log_playback("STARTUP", f"Basic init: {t1-t0:.2f}s")
@@ -85,6 +101,8 @@ class PlayerFrame(wx.Frame):
         self.wake_word_thread = None
         self.is_switching_channels = False  # Flag to prevent multiple channel switches
         self.vault_logged_in = False
+        self.livetv_process = None  # Live TV stream subprocess
+        self._livetv_last_channel = None  # last live channel, for Space resume
         
         self._create_ui()
         self._bind_hotkeys()
@@ -132,6 +150,8 @@ class PlayerFrame(wx.Frame):
         file_menu.AppendSeparator()
         upload_log_item = file_menu.Append(wx.ID_ANY, "Upload Log\tCtrl+Shift+U", "Upload log file for troubleshooting")
         self.Bind(wx.EVT_MENU, self._on_upload_log, upload_log_item)
+        check_updates_item = file_menu.Append(wx.ID_ANY, "Check for Updates", "Check for and install program updates")
+        self.Bind(wx.EVT_MENU, self._on_check_updates, check_updates_item)
         file_menu.AppendSeparator()
         set_movies_dir = file_menu.Append(wx.ID_ANY, "Set Default Movies Folder", "Set default download folder for movies")
         self.Bind(wx.EVT_MENU, lambda e: self._on_set_default_folder("movies"), set_movies_dir)
@@ -175,6 +195,9 @@ class PlayerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_set_bookmark, set_bookmark_item)
         jump_bookmark_item = controls_menu.Append(wx.ID_ANY, "Jump to Bookmark\tCtrl+J", "Jump to a saved bookmark")
         self.Bind(wx.EVT_MENU, self._on_jump_bookmark, jump_bookmark_item)
+        delete_file_item = controls_menu.Append(wx.ID_ANY, "Remove Current File\tCtrl+Delete",
+                                                "Delete the currently playing file and remove it from this channel")
+        self.Bind(wx.EVT_MENU, self._on_delete_current_file, delete_file_item)
         controls_menu.AppendSeparator()
         voice_listen_item = controls_menu.Append(wx.ID_ANY, "Voice Command (One-time)\tCtrl+Shift+B", "Listen for one voice command")
         self.Bind(wx.EVT_MENU, self._toggle_voice_listening, voice_listen_item)
@@ -183,6 +206,15 @@ class PlayerFrame(wx.Frame):
         controls_menu.AppendSeparator()
         toggle_sounds_item = controls_menu.Append(wx.ID_ANY, "Toggle Sounds\tCtrl+Shift+S", "Turn startup/exit sounds on or off")
         self.Bind(wx.EVT_MENU, self._toggle_sounds, toggle_sounds_item)
+        set_name_item = controls_menu.Append(wx.ID_ANY, "Set My Name", "Set your name for personalized messages")
+        self.Bind(wx.EVT_MENU, self._on_set_name, set_name_item)
+        controls_menu.AppendSeparator()
+        cloud_toggle_item = controls_menu.Append(wx.ID_ANY, "Auto Free Up Space (OneDrive)",
+                                                 "Automatically make downloads online-only to save disk space")
+        self.Bind(wx.EVT_MENU, self._toggle_cloud_cleanup, cloud_toggle_item)
+        free_space_item = controls_menu.Append(wx.ID_ANY, "Free Up Space Now",
+                                               "Make all downloaded files online-only right now")
+        self.Bind(wx.EVT_MENU, self._on_free_up_space_now, free_space_item)
         menubar.Append(controls_menu, "&Controls")
         
         # AudioVault menu
@@ -210,7 +242,26 @@ class PlayerFrame(wx.Frame):
             self.Bind(wx.EVT_MENU, self._on_yt_url, yt_url_item)
             yt_folder_item = yt_menu.Append(wx.ID_ANY, "Set Download Folder", "Set default YouTube download folder")
             self.Bind(wx.EVT_MENU, self._on_yt_set_folder, yt_folder_item)
+            yt_menu.AppendSeparator()
+            yt_update_item = yt_menu.Append(wx.ID_ANY, "Update YouTube Downloader", "Update yt-dlp to fix download issues")
+            self.Bind(wx.EVT_MENU, self._on_yt_update, yt_update_item)
             menubar.Append(yt_menu, "&YouTube")
+        
+        # Live TV menu (iptv-org)
+        if LIVETV_AVAILABLE:
+            livetv_menu = wx.Menu()
+            lt_browse = livetv_menu.Append(wx.ID_ANY, "Browse Live Channels\tCtrl+Shift+V", "Browse live TV channels by category")
+            self.Bind(wx.EVT_MENU, self._on_livetv_browse, lt_browse)
+            lt_search = livetv_menu.Append(wx.ID_ANY, "Search Live Channels", "Search live TV channels by name")
+            self.Bind(wx.EVT_MENU, self._on_livetv_search, lt_search)
+            lt_favs = livetv_menu.Append(wx.ID_ANY, "Live TV Favorites", "View your favorite live channels")
+            self.Bind(wx.EVT_MENU, self._on_livetv_favorites, lt_favs)
+            livetv_menu.AppendSeparator()
+            lt_stop = livetv_menu.Append(wx.ID_ANY, "Stop Live TV\tCtrl+Shift+X", "Stop the live stream")
+            self.Bind(wx.EVT_MENU, self._on_livetv_stop, lt_stop)
+            lt_refresh = livetv_menu.Append(wx.ID_ANY, "Refresh Channel List", "Re-download the live channel list")
+            self.Bind(wx.EVT_MENU, self._on_livetv_refresh, lt_refresh)
+            menubar.Append(livetv_menu, "&Live TV")
         
         self.SetMenuBar(menubar)
         
@@ -269,6 +320,8 @@ class PlayerFrame(wx.Frame):
             self._on_set_bookmark(None)
         elif keycode == ord('J') and ctrl:
             self._on_jump_bookmark(None)
+        elif keycode == wx.WXK_DELETE and ctrl:
+            self._on_delete_current_file(None)
         elif keycode == wx.WXK_LEFT:
             if ctrl:
                 self._prev_folder()
@@ -314,7 +367,7 @@ class PlayerFrame(wx.Frame):
             self._update_display()
             self.channels.update_current_channel(folders=folders)
             self.status_label.SetLabel(f"Loaded {len(folders)} folder(s) with {len(self.playlist.playlist)} files total")
-            self._toggle_play_pause()
+            self._start_playback()
     
     def _on_select_folder_recursive(self, event):
         """Open folder selection dialog and include all subfolders"""
@@ -341,7 +394,7 @@ class PlayerFrame(wx.Frame):
                 self._update_display()
                 self.channels.update_current_channel(folders=subfolders)
                 self.status_label.SetLabel(f"Loaded {len(subfolders)} subfolder(s) with {len(self.playlist.playlist)} files total")
-                self._toggle_play_pause()
+                self._start_playback()
             else:
                 self.status_label.SetLabel("No subfolders with MP3 files found")
         
@@ -362,7 +415,32 @@ class PlayerFrame(wx.Frame):
         return False
     
     def _toggle_play_pause(self):
-        """Toggle play/pause"""
+        """Toggle play/pause.
+
+        Live TV can't truly pause (it's a live broadcast), so we emulate
+        pause/resume: Space stops the stream; Space again re-tunes the SAME
+        live channel from the live edge. Only once the user does something
+        else (picks a channel, selects folders) do we leave 'live mode' and
+        let Space control the local MP3 player again.
+        """
+        # Currently streaming live -> stop it (acts as "pause")
+        if getattr(self, "livetv_process", None):
+            self.logger.log_playback("LIVETV", "Space pressed during live TV -> pausing stream")
+            self._livetv_stop_stream()
+            self._update_title()
+            msg = "Live TV paused"
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+
+        # Stopped, but live TV was the last thing playing -> resume it (re-tune)
+        if getattr(self, "_livetv_last_channel", None):
+            ch = self._livetv_last_channel
+            self.logger.log_playback("LIVETV", "Space pressed -> resuming last live channel")
+            speak("Resuming live TV")
+            self._livetv_play(ch)
+            return
+
         if not self.playlist.get_current():
             msg = "No files loaded. Use Ctrl+O to select folders."
             self.status_label.SetLabel(msg)
@@ -387,7 +465,106 @@ class PlayerFrame(wx.Frame):
                 msg = f"Playing: {self.playlist.get_current_file_name()}"
                 self.status_label.SetLabel(msg)
                 speak(msg)
-    
+
+    def _start_playback(self):
+        """Stop any live stream and start/resume local MP3 playback.
+        Used by auto-play after selecting folders or a channel (unlike the
+        Space key, this always begins local playback)."""
+        if getattr(self, "livetv_process", None):
+            self._livetv_stop_stream()
+            self._update_title()
+        # The user chose local content, so leave live mode: Space should now
+        # control the MP3 player, not resume a live channel.
+        self._livetv_last_channel = None
+        if not self.playlist.get_current():
+            return
+        if not self.player.is_playing:
+            if not self.player.current_file:
+                if self._load_current_file():
+                    self.player.play()
+                    msg = f"Playing: {self.playlist.get_current_file_name()}"
+                    self.status_label.SetLabel(msg)
+                    speak(msg)
+            else:
+                self.player.unpause()
+                msg = f"Playing: {self.playlist.get_current_file_name()}"
+                self.status_label.SetLabel(msg)
+                speak(msg)
+
+    def _on_delete_current_file(self, event=None):
+        """Delete the currently-loaded file from disk and remove it from the
+        channel, then move on to the next file. Bound to Ctrl+Delete."""
+        current = self.playlist.get_current()
+        if not current:
+            msg = "No file is loaded to remove."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+
+        filepath = str(current[1])
+        file_name = self.playlist.get_current_file_name()
+
+        # Confirm, so a file isn't deleted by an accidental key press
+        result = wx.MessageBox(
+            f"Remove and delete this file?\n\n{file_name}\n\n"
+            f"This deletes the file from your computer and removes it from this channel.",
+            "Delete File",
+            wx.YES_NO | wx.ICON_WARNING
+        )
+        if result != wx.YES:
+            return
+
+        # Stop playback and release the file so Windows lets us delete it
+        try:
+            self.player.stop()
+            self.player.is_playing = False
+            self.player.current_file = None
+            try:
+                import pygame
+                pygame.mixer.music.unload()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Delete from disk (best effort)
+        deleted = False
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                deleted = True
+        except Exception as e:
+            self.logger.log_error(f"DELETE FILE ERROR: {file_name} - {e}")
+            wx.MessageBox(
+                f"Could not delete the file from disk: {e}\n\n"
+                f"It will still be removed from this channel.",
+                "Delete Warning", wx.OK | wx.ICON_WARNING
+            )
+
+        # Remove from the in-memory playlist and refresh the channel cache
+        self.playlist.remove_current()
+        try:
+            self.channels.update_current_channel(
+                cached_playlist=self.playlist.get_cache_data()
+            )
+        except Exception:
+            pass
+
+        self.logger.log_channel("REMOVE-FILE", self.channels.current_channel or "",
+                                f"{file_name} (deleted from disk: {deleted})")
+
+        # Load whatever is now at the current position and continue
+        if self.playlist.get_current():
+            self._load_current_file()
+            if self.player.is_playing:
+                self.player.play()
+            new_name = self.playlist.get_current_file_name()
+            msg = f"Removed {file_name}. Now on: {new_name}"
+        else:
+            msg = f"Removed {file_name}. No more files in this channel."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+
     def _next_file(self):
         """Go to next file"""
         old_file = f"{self.playlist.get_current_folder_name()}/{self.playlist.get_current_file_name()}"
@@ -674,6 +851,10 @@ class PlayerFrame(wx.Frame):
     def _switch_to_channel(self, channel_name, start_from_beginning=False):
         """Switch to a specific channel"""
         self._play_sound_effect("remote.mp3")
+        # Switching to a local MP3 channel exits live mode and stops any stream.
+        if getattr(self, "livetv_process", None):
+            self._livetv_stop_stream()
+        self._livetv_last_channel = None
         # Stop timer during switch to prevent saving wrong state
         self.timer.Stop()
         if self.channels.switch_channel(channel_name):
@@ -1114,7 +1295,9 @@ class PlayerFrame(wx.Frame):
         if corrupted:
             self.logger.log_error(f"CORRUPTION DETECTED in channels: {', '.join(corrupted)}")
             names = ", ".join(corrupted)
-            msg = (f"Ashley, your channel data appears corrupted. "
+            user_name = self._get_user_name()
+            greeting = f"{user_name}, your" if user_name else "Your"
+            msg = (f"{greeting} channel data appears corrupted. "
                    f"Affected channels: {names}. "
                    f"You may need to start your channel list fresh.")
             speak(msg)
@@ -1127,7 +1310,7 @@ class PlayerFrame(wx.Frame):
                 channels_file = self.channels.channels_file
                 if channels_file.exists():
                     channels_file.unlink()
-                    self.channels = ChannelManager(channels_file)
+                    self.channels = ChannelManager(channels_file, logger=self.logger)
                     self.playlist = PlaylistManager()
                     self._update_display()
                     self._update_title()
@@ -1146,6 +1329,47 @@ class PlayerFrame(wx.Frame):
         except Exception:
             return True
 
+    def _get_user_name(self):
+        """Return the saved user name, or empty string if not set."""
+        import configparser
+        config = configparser.ConfigParser()
+        config_path = Path(__file__).parent / "config.ini"
+        try:
+            config.read(config_path)
+            return config.get("settings", "user_name", fallback="").strip()
+        except Exception:
+            return ""
+
+    def _set_user_name(self, name):
+        """Save the user's name to config."""
+        import configparser
+        config_path = Path(__file__).parent / "config.ini"
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        if "settings" not in config:
+            config["settings"] = {}
+        config["settings"]["user_name"] = name.strip()
+        with open(config_path, "w") as f:
+            config.write(f)
+
+    def _on_set_name(self, event=None):
+        """Prompt the user to set or change their name."""
+        current = self._get_user_name()
+        dlg = wx.TextEntryDialog(
+            self, "What is your name? (used to personalize messages)",
+            "Your Name", current
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            name = dlg.GetValue().strip()
+            self._set_user_name(name)
+            if name:
+                msg = f"Name set to {name}"
+            else:
+                msg = "Name cleared"
+            self.status_label.SetLabel(msg)
+            speak(msg)
+        dlg.Destroy()
+
     def _toggle_sounds(self, event=None):
         """Toggle startup/outro sounds on or off"""
         import configparser
@@ -1163,6 +1387,173 @@ class PlayerFrame(wx.Frame):
         msg = f"Startup and exit sounds turned {state}"
         self.status_label.SetLabel(msg)
         speak(msg)
+
+    # ---- OneDrive "free up space" (online-only) support ----
+
+    def _cloud_cleanup_enabled(self):
+        """Whether downloads are automatically made online-only after download."""
+        import configparser
+        config = configparser.ConfigParser()
+        config_path = Path(__file__).parent / "config.ini"
+        try:
+            config.read(config_path)
+            return config.getboolean("settings", "cloud_cleanup_enabled", fallback=False)
+        except Exception:
+            return False
+
+    def _toggle_cloud_cleanup(self, event=None):
+        """Toggle automatic 'free up space' (online-only) for downloads."""
+        import configparser
+        config_path = Path(__file__).parent / "config.ini"
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        if "settings" not in config:
+            config["settings"] = {}
+        new_value = not config.getboolean("settings", "cloud_cleanup_enabled", fallback=False)
+        config["settings"]["cloud_cleanup_enabled"] = str(new_value)
+        with open(config_path, "w") as f:
+            config.write(f)
+        if new_value:
+            msg = ("Automatic cloud cleanup turned on. After each download, files will be "
+                   "set to online-only to free local disk space. They stay playable and "
+                   "download on demand when you play them.")
+        else:
+            msg = "Automatic cloud cleanup turned off. Downloads will keep full local copies."
+        self.status_label.SetLabel("Cloud cleanup " + ("on" if new_value else "off"))
+        speak(msg)
+        wx.MessageBox(msg, "Cloud Cleanup", wx.OK | wx.ICON_INFORMATION)
+
+    def _free_up_space(self, folder):
+        """Mark everything in `folder` as online-only in OneDrive, reclaiming
+        local disk space. Uses the same mechanism as right-click > Free up space.
+        Safe no-op if the folder isn't in OneDrive or Files On-Demand is off.
+        Returns (success, message)."""
+        self.logger.log_playback("CLOUD", f"--- Free up space requested for: {folder}")
+
+        if not folder or not os.path.isdir(folder):
+            self.logger.log_error(f"CLOUD: folder not found: {folder}")
+            return False, "Folder not found."
+        if os.name != "nt":
+            self.logger.log_error("CLOUD: not Windows, online-only not supported")
+            return False, "Online-only files are only supported on Windows."
+
+        # Diagnostic: is this folder actually inside a OneDrive path?
+        onedrive_env = os.environ.get("OneDrive", "") or os.environ.get("OneDriveConsumer", "")
+        in_onedrive = ("onedrive" in folder.lower()) or (onedrive_env and onedrive_env.lower() in folder.lower())
+        self.logger.log_playback("CLOUD", f"OneDrive env='{onedrive_env}', folder in OneDrive={in_onedrive}")
+        if not in_onedrive:
+            self.logger.log_error(
+                f"CLOUD: folder is NOT under OneDrive — 'free up space' only works inside "
+                f"the OneDrive folder. folder={folder}"
+            )
+            return False, ("This folder is not inside OneDrive, so it can't be made online-only. "
+                           "Set your download folder to a location inside OneDrive.")
+
+        # Count files up front so we can tell if anything was even present
+        mp3_count = 0
+        for _root, _dirs, files in os.walk(folder):
+            mp3_count += sum(1 for f in files if f.lower().endswith(".mp3"))
+        self.logger.log_playback("CLOUD", f"Found {mp3_count} mp3 file(s) under folder")
+
+        try:
+            # attrib +U (unpinned / online-only) -P (remove pinned) recursively.
+            result = subprocess.run(
+                ["attrib", "+U", "-P", "/s", os.path.join(folder, "*")],
+                capture_output=True, text=True, timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+            out = (result.stdout or "").strip()
+            err = (result.stderr or "").strip()
+            self.logger.log_playback("CLOUD", f"attrib rc={result.returncode}")
+            if out:
+                self.logger.log_playback("CLOUD", f"attrib stdout: {out[:500]}")
+            if err:
+                self.logger.log_error(f"CLOUD: attrib stderr: {err[:500]}")
+
+            # Verify: check a sample of files for the 'U' (unpinned/online-only)
+            # attribute so we know whether it actually took effect.
+            verified = self._verify_online_only(folder)
+            self.logger.log_playback("CLOUD", f"Verification: {verified}")
+
+            return True, f"Freed local space: {folder} is now online-only. ({verified})"
+        except subprocess.TimeoutExpired:
+            self.logger.log_error("CLOUD: attrib timed out")
+            return False, "Freeing space timed out."
+        except Exception as e:
+            self.logger.log_error(f"CLOUD CLEANUP ERROR: {e}")
+            return False, f"Could not free space: {e}"
+
+    def _verify_online_only(self, folder, sample=5):
+        """Check a sample of files to see if they now carry the online-only
+        attribute. Returns a short human-readable summary for the log."""
+        try:
+            checked = 0
+            online_only = 0
+            for root, _dirs, files in os.walk(folder):
+                for f in files:
+                    if not f.lower().endswith(".mp3"):
+                        continue
+                    path = os.path.join(root, f)
+                    try:
+                        r = subprocess.run(
+                            ["attrib", path],
+                            capture_output=True, text=True, timeout=15,
+                            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                        )
+                        line = (r.stdout or "").strip()
+                        # The 'U' flag in attrib output marks unpinned/online-only
+                        attrs = line.split(os.sep)[0] if line else ""
+                        if "U" in attrs:
+                            online_only += 1
+                        checked += 1
+                    except Exception:
+                        pass
+                    if checked >= sample:
+                        break
+                if checked >= sample:
+                    break
+            return f"{online_only}/{checked} sampled files are online-only"
+        except Exception as e:
+            return f"verify error: {e}"
+
+    def _maybe_free_up_space(self, folder):
+        """Run cloud cleanup on `folder` if the auto setting is enabled."""
+        if self._cloud_cleanup_enabled():
+            ok, msg = self._free_up_space(folder)
+            if ok:
+                self.status_label.SetLabel("Freed local disk space (files now online-only)")
+                self.logger.log_playback("CLOUD", msg)
+            else:
+                self.logger.log_error(f"CLOUD: free up space did not run: {msg}")
+
+    def _on_free_up_space_now(self, event=None):
+        """Menu action: free up space on all configured download folders now."""
+        folders = set()
+        try:
+            folders.add(av.load_download_dir(kind="movies"))
+            folders.add(av.load_download_dir(kind="shows"))
+            folders.add(av.load_download_dir())
+        except Exception:
+            pass
+        try:
+            folders.add(yt.load_download_dir())
+        except Exception:
+            pass
+
+        freed = []
+        for folder in folders:
+            if folder and os.path.isdir(folder):
+                ok, _ = self._free_up_space(folder)
+                if ok:
+                    freed.append(folder)
+
+        if freed:
+            msg = f"Freed local space on {len(freed)} download folder(s). Files are now online-only."
+        else:
+            msg = "No download folders were found to free up."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        wx.MessageBox(msg, "Free Up Space", wx.OK | wx.ICON_INFORMATION)
 
     def _play_startup_sound(self):
         """Play startup sound if available and enabled"""
@@ -1326,7 +1717,7 @@ class PlayerFrame(wx.Frame):
         if self.playlist.get_current():
             self.logger.log_playback("AUTO-PLAY", "Starting playback after channel switch")
             self._advance_attempts = 0
-            self._toggle_play_pause()
+            self._start_playback()
             msg = f"Now playing: {self.channels.current_channel}"
             speak(msg)
             self.is_switching_channels = False
@@ -1354,6 +1745,75 @@ class PlayerFrame(wx.Frame):
             speak(msg)
         dlg.Destroy()
     
+    def _on_check_updates(self, event=None):
+        """Manually check for updates, show results, and install if the user agrees."""
+        msg = "Checking for updates..."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        threading.Thread(target=self._check_updates_thread, daemon=True).start()
+
+    def _check_updates_thread(self):
+        try:
+            from auto_updater import check_for_updates
+            available = check_for_updates()
+            wx.CallAfter(self._check_updates_result, available, None)
+        except Exception as e:
+            self.logger.log_error(f"UPDATE CHECK ERROR: {e}")
+            wx.CallAfter(self._check_updates_result, None, str(e))
+
+    def _check_updates_result(self, available, error):
+        if error:
+            msg = f"Could not check for updates: {error}"
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            wx.MessageBox(msg, "Update Check Failed", wx.OK | wx.ICON_ERROR)
+            return
+        if not available:
+            msg = "You are up to date. No updates available."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            wx.MessageBox(msg, "No Updates", wx.OK | wx.ICON_INFORMATION)
+            return
+
+        count = len(available)
+        listing = "\n".join(available[:20]) + ("\n..." if count > 20 else "")
+        result = wx.MessageBox(
+            f"{count} update(s) available:\n{listing}\n\nDownload and install now?",
+            "Updates Available",
+            wx.YES_NO | wx.ICON_QUESTION
+        )
+        if result != wx.YES:
+            self.status_label.SetLabel("Update cancelled")
+            return
+
+        self.status_label.SetLabel("Downloading updates...")
+        speak("Downloading updates, please wait")
+        threading.Thread(target=self._apply_updates_thread, args=(available,), daemon=True).start()
+
+    def _apply_updates_thread(self, available):
+        try:
+            from auto_updater import apply_updates
+            updated = apply_updates(available)
+            wx.CallAfter(self._apply_updates_result, updated, None)
+        except Exception as e:
+            self.logger.log_error(f"UPDATE APPLY ERROR: {e}")
+            wx.CallAfter(self._apply_updates_result, None, str(e))
+
+    def _apply_updates_result(self, updated, error):
+        if error:
+            msg = f"Update failed: {error}"
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            wx.MessageBox(msg, "Update Failed", wx.OK | wx.ICON_ERROR)
+            return
+        count = len(updated or [])
+        self.logger.log_playback("UPDATE", f"Applied {count} file(s): {', '.join(updated or [])}")
+        msg = (f"Updated {count} file(s). Please close and reopen AudioVault TV "
+               f"completely for the changes to take effect.")
+        self.status_label.SetLabel("Update complete - please restart the app")
+        speak(msg)
+        wx.MessageBox(msg, "Update Complete", wx.OK | wx.ICON_INFORMATION)
+
     def _on_upload_log(self, event):
         """Manually upload log file to S3"""
         msg = "Uploading log..."
@@ -1612,6 +2072,28 @@ class PlayerFrame(wx.Frame):
                             self.download_subfolder = subfolder
                     else:
                         name_dlg.Destroy()
+            else:
+                # Single item: still give it its own subfolder so we can offer
+                # to make a channel from it. Default the name to the show name
+                # (with the season/year suffix trimmed off), editable by the user.
+                single_name = results[selections[0]][1]
+                suggested = self._suggest_channel_name(single_name)
+                name_dlg = wx.TextEntryDialog(
+                    self,
+                    "Folder/channel name for this download:",
+                    "Create Channel",
+                    suggested
+                )
+                if name_dlg.ShowModal() == wx.ID_OK:
+                    subfolder = name_dlg.GetValue().strip()
+                    name_dlg.Destroy()
+                    if subfolder:
+                        subfolder = av.sanitize_filename(subfolder)
+                        dest = os.path.join(dest, subfolder)
+                        os.makedirs(dest, exist_ok=True)
+                        self.download_subfolder = subfolder
+                else:
+                    name_dlg.Destroy()
             
             self.download_dest = dest
             self.download_queue_index = 0
@@ -1619,6 +2101,21 @@ class PlayerFrame(wx.Frame):
             self._vault_download_next()
         else:
             dlg.Destroy()
+
+    def _suggest_channel_name(self, name):
+        """Derive a clean show name from a season title for use as a channel name.
+        e.g. 'Law and Order - Season 23 (2024)' -> 'Law and Order'."""
+        import re
+        cleaned = name
+        # Strip a trailing year in parentheses, e.g. "(2024)"
+        cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", cleaned)
+        # Strip trailing "- Season N" / "Season N" / "- S01" style suffixes
+        cleaned = re.sub(r"\s*[-–]?\s*Season\s*\d+\s*$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*[-–]?\s*S\d{1,2}\s*$", "", cleaned, flags=re.IGNORECASE)
+        # Strip trailing bracketed notes like "[Not Described]"
+        cleaned = re.sub(r"\s*\[[^\]]*\]\s*$", "", cleaned)
+        cleaned = cleaned.strip(" -–")
+        return cleaned if cleaned else name
     
     def _vault_start_download(self, name, download_url):
         """Start downloading a single file"""
@@ -1636,6 +2133,25 @@ class PlayerFrame(wx.Frame):
         else:
             dlg.Destroy()
     
+    def _vault_already_downloaded(self, name):
+        """Return True if this item was already downloaded & extracted in a
+        previous run (its extraction folder exists and contains MP3 files).
+        Used to skip completed items when retrying a failed batch."""
+        try:
+            dest = self.download_dest
+            if not dest:
+                return False
+            safe_name = av.sanitize_filename(name)
+            # _vault_extract_zip extracts into <dest>/<safe_name>
+            extract_dir = os.path.join(dest, safe_name)
+            if os.path.isdir(extract_dir):
+                for root, dirs, files in os.walk(extract_dir):
+                    if any(f.lower().endswith('.mp3') for f in files):
+                        return True
+            return False
+        except Exception:
+            return False
+
     def _vault_download_next(self):
         """Download next item in queue"""
         if self.download_queue_index >= len(self.download_queue):
@@ -1643,7 +2159,11 @@ class PlayerFrame(wx.Frame):
             msg = f"All {total} download(s) complete"
             self.status_label.SetLabel(msg)
             speak(msg)
-            
+
+            # If enabled, free local disk space by making the downloaded files
+            # online-only in OneDrive (they stay playable, download on demand).
+            self._maybe_free_up_space(self.download_dest)
+
             # Offer channel creation if downloaded to subfolder
             if self.download_subfolder:
                 self._vault_offer_channel_creation()
@@ -1654,7 +2174,18 @@ class PlayerFrame(wx.Frame):
         name, url = self.download_queue[self.download_queue_index]
         current = self.download_queue_index + 1
         total = len(self.download_queue)
-        
+
+        # Skip items that were already successfully downloaded & extracted in a
+        # previous run, so retrying a failed batch only fetches what's missing.
+        if self._vault_already_downloaded(name):
+            self.logger.log_channel("VAULT", "SKIP", f"Already downloaded: {name}")
+            self.status_label.SetLabel(f"Already downloaded, skipping: {name}")
+            speak(f"Already have {name}, skipping")
+            self.download_queue_index += 1
+            # Move to the next item immediately
+            wx.CallLater(50, self._vault_download_next)
+            return
+
         self.download_progress = wx.ProgressDialog(
             f"Downloading ({current}/{total})",
             f"Starting: {name}...",
@@ -1672,16 +2203,24 @@ class PlayerFrame(wx.Frame):
         )
         thread.start()
     
-    def _vault_download_thread(self, name, download_url, destination):
+    def _vault_download_thread(self, name, download_url, destination, _retry=False):
         """Background thread for download"""
         try:
             self.logger.log_channel("VAULT", "DOWNLOAD", f"Starting download: {name} from {download_url} to {destination}")
-            
+
+            # Verify the destination drive is actually connected and writable
+            # before we start. External drives (e.g. D:) sometimes disconnect.
+            drive_ok, drive_msg = self._check_destination_writable(destination)
+            if not drive_ok:
+                self.logger.log_error(f"VAULT DOWNLOAD ABORTED: {drive_msg}")
+                wx.CallAfter(self._vault_download_failed, drive_msg)
+                return
+
             def progress(percent, total_size, filename):
                 wx.CallAfter(self._vault_update_progress, percent, total_size, filename)
-            
+
             filepath = av.download(download_url, destination=destination, progress_callback=progress)
-            
+
             if filepath:
                 self.logger.log_channel("VAULT", "DOWNLOAD", f"Complete: {filepath}")
                 wx.CallAfter(self._vault_download_complete, name, filepath)
@@ -1690,8 +2229,114 @@ class PlayerFrame(wx.Frame):
                 self.vault_logged_in = False
                 wx.CallAfter(self._vault_download_failed, f"Download failed for {name}. Session may have expired.")
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             self.logger.log_error(f"VAULT DOWNLOAD ERROR: {name} - {e}")
-            wx.CallAfter(self._vault_download_failed, f"Download error for {name}: {e}")
+            self.logger.log_error(f"VAULT DOWNLOAD TRACEBACK: {tb}")
+            # Clean up any partial .zip left behind by the failed write
+            self._cleanup_partial_download(name, destination)
+
+            # If this failed because the disk is full, automatically free up
+            # space (make OneDrive files online-only) and retry once.
+            if self._is_low_disk_error(e) and not _retry:
+                self.logger.log_error("VAULT DOWNLOAD: low disk space — attempting auto free-up-space then retry")
+                wx.CallAfter(self.status_label.SetLabel, "Disk full — freeing up space and retrying...")
+                speak("Disk is full. Freeing up space and trying again.")
+                freed = self._free_up_space_all_onedrive()
+                self.logger.log_playback("CLOUD", f"Auto free-up before retry freed: {freed}")
+                # Retry the same download once
+                self._vault_download_thread(name, download_url, destination, _retry=True)
+                return
+
+            # Give a plain-English message for the common drive/network faults
+            friendly = self._explain_download_error(e, destination)
+            if self._is_low_disk_error(e) and _retry:
+                friendly = ("Still out of disk space after freeing up room. Your drive is full. "
+                            "Delete some files or move your download folder into OneDrive so it can "
+                            "be made online-only.")
+            wx.CallAfter(self._vault_download_failed, friendly)
+
+    def _is_low_disk_error(self, e):
+        """Detect whether an exception indicates the disk ran out of space."""
+        text = str(e).lower()
+        markers = [
+            "no space left",          # Linux/general
+            "errno 28",               # ENOSPC
+            "not enough space",       # Windows
+            "disk is full",
+            "there is not enough space on the disk",
+            "winerror 112",           # ERROR_DISK_FULL
+        ]
+        return any(m in text for m in markers)
+
+    def _free_up_space_all_onedrive(self):
+        """Run free-up-space on all configured download folders that live in
+        OneDrive. Returns a short summary string for logging."""
+        folders = set()
+        try:
+            folders.add(av.load_download_dir(kind="movies"))
+            folders.add(av.load_download_dir(kind="shows"))
+            folders.add(av.load_download_dir())
+        except Exception:
+            pass
+        try:
+            folders.add(yt.load_download_dir())
+        except Exception:
+            pass
+        results = []
+        for folder in folders:
+            if folder and os.path.isdir(folder):
+                ok, msg = self._free_up_space(folder)
+                results.append(f"{folder}: {'ok' if ok else msg}")
+        return "; ".join(results) if results else "no folders"
+
+    def _check_destination_writable(self, destination):
+        """Return (ok, message). Verifies the destination drive exists and we
+        can write to it — catches a disconnected external drive early."""
+        try:
+            # Check the drive root (e.g. 'D:\\') exists
+            drive = os.path.splitdrive(os.path.abspath(destination))[0]
+            if drive and not os.path.exists(drive + os.sep):
+                return False, (f"The {drive} drive is not available. Please check that your "
+                               f"external drive is plugged in and powered on, then try again.")
+            os.makedirs(destination, exist_ok=True)
+            # Try an actual tiny write to confirm the drive accepts writes
+            test_file = os.path.join(destination, ".write_test.tmp")
+            with open(test_file, "wb") as f:
+                f.write(b"ok")
+            os.remove(test_file)
+            return True, ""
+        except Exception as e:
+            drive = os.path.splitdrive(os.path.abspath(destination))[0] or "the download"
+            return False, (f"Cannot write to {drive} drive ({e}). The external drive may be "
+                           f"disconnected or full. Please check it and try again.")
+
+    def _cleanup_partial_download(self, name, destination):
+        """Remove a partial/corrupt .zip left behind by a failed download."""
+        try:
+            safe_name = av.sanitize_filename(name)
+            for candidate in (name, safe_name):
+                p = os.path.join(destination, f"{candidate}.zip")
+                if os.path.exists(p):
+                    os.remove(p)
+                    self.logger.log_channel("VAULT", "CLEANUP", f"Removed partial file: {p}")
+        except Exception:
+            pass
+
+    def _explain_download_error(self, e, destination):
+        """Turn a raw exception into a clear message for common drive/network faults."""
+        text = str(e)
+        drive = os.path.splitdrive(os.path.abspath(destination))[0] or "the drive"
+        if "10054" in text or "Connection broken" in text or "forcibly closed" in text:
+            return ("The download was interrupted by a network drop. Check your internet "
+                    "connection and try again.")
+        if "Errno 22" in text or "WinError 3" in text or "cannot find the path" in text:
+            return (f"The {drive} drive became unavailable during the download. External drives "
+                    f"can disconnect if the cable is loose or the drive sleeps. Reconnect it and "
+                    f"try again.")
+        if "No space" in text or "28" in text and "Errno" in text:
+            return f"The {drive} drive is out of space. Free up space and try again."
+        return f"Download error: {e}"
     
     def _vault_update_progress(self, percent, total_size, filename):
         """Update download progress dialog"""
@@ -1738,8 +2383,10 @@ class PlayerFrame(wx.Frame):
                 self.logger.log_error(f"VAULT: Not a valid ZIP: {zip_path}")
                 return False
             
-            # Extract to folder named after the show
-            extract_dir = os.path.join(os.path.dirname(zip_path), name)
+            # Extract to folder named after the show (sanitize illegal chars
+            # like ':' so Windows doesn't reject the folder name)
+            safe_name = av.sanitize_filename(name)
+            extract_dir = os.path.join(os.path.dirname(zip_path), safe_name)
             os.makedirs(extract_dir, exist_ok=True)
             
             speak(f"Extracting {name}")
@@ -1866,7 +2513,7 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
         self.logger.log_channel("VAULT", "CHANNEL-CREATE", f"{channel_name} with {len(folders)} folders")
-        self._toggle_play_pause()
+        self._start_playback()
     
     def _vault_download_failed(self, message):
         """Handle failed download with error dialog"""
@@ -1897,6 +2544,58 @@ class PlayerFrame(wx.Frame):
             speak(msg)
         dlg.Destroy()
 
+    def _on_yt_update(self, event):
+        """Update yt-dlp to the latest version"""
+        current_version = yt.get_ytdlp_version()
+        self.status_label.SetLabel("Checking for updates...")
+        speak("Checking for latest version")
+        # Check latest version in background so the UI doesn't freeze
+        threading.Thread(target=self._yt_check_version_thread, args=(current_version,), daemon=True).start()
+
+    def _yt_check_version_thread(self, current_version):
+        latest = yt.get_latest_ytdlp_version()
+        wx.CallAfter(self._yt_prompt_update, current_version, latest)
+
+    def _yt_prompt_update(self, current_version, latest_version):
+        if latest_version:
+            if yt.versions_match(current_version, latest_version):
+                msg = f"YouTube downloader is already up to date (version {current_version})."
+                self.status_label.SetLabel(msg)
+                speak(msg)
+                wx.MessageBox(msg, "Up To Date", wx.OK | wx.ICON_INFORMATION)
+                return
+            prompt = (
+                f"Current version: {current_version}\n"
+                f"Latest version:  {latest_version}\n\n"
+                f"Update now? (Requires internet, may take a minute.)"
+            )
+        else:
+            prompt = (
+                f"Current version: {current_version}\n"
+                f"Latest version:  could not be checked (no internet?)\n\n"
+                f"Attempt update anyway?"
+            )
+        confirm = wx.MessageBox(prompt, "Update YouTube Downloader", wx.YES_NO | wx.ICON_QUESTION)
+        if confirm != wx.YES:
+            self.status_label.SetLabel("Update cancelled")
+            return
+        msg = "Updating YouTube downloader, please wait..."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self.logger.log_playback("YOUTUBE-UPDATE", f"Starting update from {current_version} to {latest_version}")
+        threading.Thread(target=self._yt_update_thread, daemon=True).start()
+
+    def _yt_update_thread(self):
+        success, message = yt.update_ytdlp()
+        wx.CallAfter(self._yt_update_done, success, message)
+
+    def _yt_update_done(self, success, message):
+        self.status_label.SetLabel(message)
+        speak(message)
+        self.logger.log_playback("YOUTUBE-UPDATE", f"Result: {message}")
+        icon = wx.ICON_INFORMATION if success else wx.ICON_ERROR
+        wx.MessageBox(message, "Update Complete" if success else "Update Failed", wx.OK | icon)
+
     def _on_yt_url(self, event):
         """Download from a YouTube URL"""
         dlg = wx.TextEntryDialog(self, "Paste YouTube URL:", "Download from URL")
@@ -1920,6 +2619,7 @@ class PlayerFrame(wx.Frame):
 
     def _yt_handle_detected_url(self, url, info):
         dest = yt.load_download_dir()
+        self._yt_download_subfolder = None
 
         if info["is_playlist"]:
             count = info["count"]
@@ -1937,6 +2637,7 @@ class PlayerFrame(wx.Frame):
             if subfolder:
                 dest = os.path.join(dest, subfolder)
                 os.makedirs(dest, exist_ok=True)
+                self._yt_download_subfolder = subfolder
 
             self._yt_download_queue = [(e["title"], e["url"]) for e in info["entries"]]
         else:
@@ -1948,31 +2649,86 @@ class PlayerFrame(wx.Frame):
         self._yt_download_next()
 
     def _on_yt_search(self, event):
-        """Search YouTube"""
-        dlg = wx.TextEntryDialog(self, "Search YouTube:", "YouTube Search")
+        """Search YouTube with options for full episodes and sorting."""
+        dlg = wx.Dialog(self, title="YouTube Search", size=(440, 260))
+        panel = wx.Panel(dlg)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        sizer.Add(wx.StaticText(panel, label="Search YouTube:"), 0, wx.ALL, 8)
+        query_ctrl = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        sizer.Add(query_ctrl, 0, wx.ALL | wx.EXPAND, 8)
+
+        full_ep_cb = wx.CheckBox(panel, label="Full episodes only (hide short clips)")
+        sizer.Add(full_ep_cb, 0, wx.ALL, 8)
+
+        sizer.Add(wx.StaticText(panel, label="Sort results by:"), 0, wx.LEFT | wx.TOP, 8)
+        sort_choice = wx.Choice(panel, choices=["Relevance (default)", "Longest first", "Shortest first"])
+        sort_choice.SetSelection(0)
+        sizer.Add(sort_choice, 0, wx.ALL | wx.EXPAND, 8)
+
+        btn_sizer = wx.StdDialogButtonSizer()
+        ok_btn = wx.Button(panel, wx.ID_OK, "Search")
+        btn_sizer.AddButton(ok_btn)
+        btn_sizer.AddButton(wx.Button(panel, wx.ID_CANCEL))
+        btn_sizer.Realize()
+        sizer.Add(btn_sizer, 0, wx.ALL | wx.ALIGN_CENTER, 10)
+
+        panel.SetSizer(sizer)
+        query_ctrl.SetFocus()
+        query_ctrl.Bind(wx.EVT_TEXT_ENTER, lambda e: dlg.EndModal(wx.ID_OK))
+
         if dlg.ShowModal() == wx.ID_OK:
-            query = dlg.GetValue().strip()
+            query = query_ctrl.GetValue().strip()
+            full_episodes = full_ep_cb.GetValue()
+            sort_map = {0: "relevance", 1: "longest", 2: "shortest"}
+            sort_by = sort_map.get(sort_choice.GetSelection(), "relevance")
             dlg.Destroy()
             if query:
-                msg = f"Searching YouTube for {query}..."
+                extra = " (full episodes only)" if full_episodes else ""
+                msg = f"Searching YouTube for {query}{extra}..."
                 self.status_label.SetLabel(msg)
                 speak(msg)
-                threading.Thread(target=self._yt_search_thread, args=(query,), daemon=True).start()
+                threading.Thread(
+                    target=self._yt_search_thread,
+                    args=(query, full_episodes, sort_by),
+                    daemon=True
+                ).start()
         else:
             dlg.Destroy()
 
-    def _yt_search_thread(self, query):
+    def _yt_search_thread(self, query, full_episodes_only=False, sort_by="relevance"):
+        self.logger.log_playback("YOUTUBE", f"Search start: query='{query}' full_only={full_episodes_only} sort={sort_by}")
         try:
-            results = yt.search(query)
+            results = yt.search(query, full_episodes_only=full_episodes_only, sort_by=sort_by)
+            self.logger.log_playback("YOUTUBE", f"Search returned {len(results) if results else 0} result(s)")
+            if not results:
+                if full_episodes_only:
+                    wx.CallAfter(self._yt_error_dialog,
+                        f"No full episodes found for '{query}'. Try unchecking "
+                        f"'Full episodes only' to see shorter videos.")
+                else:
+                    wx.CallAfter(self._yt_error_dialog,
+                        f"No results found for '{query}'. YouTube may be temporarily blocking "
+                        f"searches, or the downloader needs updating (YouTube menu > Update "
+                        f"YouTube Downloader).")
+                return
             wx.CallAfter(self._yt_show_results, results)
         except Exception as e:
-            wx.CallAfter(self._yt_error, f"YouTube search error: {e}")
+            self.logger.log_error(f"YOUTUBE: Search error for '{query}': {e}")
+            wx.CallAfter(self._yt_error_dialog, f"YouTube search error:\n\n{e}")
+
+    def _yt_error_dialog(self, message):
+        """Show a visible error dialog (not just a spoken status line, which
+        can be missed) and speak it, for YouTube problems."""
+        self.status_label.SetLabel(message)
+        speak(message)
+        self.logger.log_error(f"YOUTUBE: {message}")
+        wx.MessageBox(message, "YouTube", wx.OK | wx.ICON_WARNING)
+
 
     def _yt_show_results(self, results):
         if not results:
-            msg = "No results found"
-            self.status_label.SetLabel(msg)
-            speak(msg)
+            self._yt_error_dialog("No results found.")
             return
 
         items = [f"{r['title']} [{r['duration']}] - {r['channel']}" for r in results]
@@ -2012,6 +2768,7 @@ class PlayerFrame(wx.Frame):
                 return
 
             dest = yt.load_download_dir()
+            self._yt_download_subfolder = None
 
             # Offer subfolder grouping for multiple items
             if len(selections) > 1:
@@ -2024,6 +2781,7 @@ class PlayerFrame(wx.Frame):
                         if subfolder:
                             dest = os.path.join(dest, subfolder)
                             os.makedirs(dest, exist_ok=True)
+                            self._yt_download_subfolder = subfolder
                     else:
                         name_dlg.Destroy()
 
@@ -2039,66 +2797,426 @@ class PlayerFrame(wx.Frame):
         """Download next item in YouTube queue"""
         if self._yt_download_idx >= len(self._yt_download_queue):
             total = len(self._yt_download_queue)
+            self._yt_close_progress_dialog()
             msg = f"All {total} YouTube download(s) complete"
             self.status_label.SetLabel(msg)
             speak(msg)
-            wx.MessageBox(msg, "Downloads Complete", wx.OK | wx.ICON_INFORMATION)
+            # Free local disk space if the auto cloud-cleanup setting is on
+            self._maybe_free_up_space(self._yt_download_dest)
+            # If everything was grouped into a subfolder, offer to make a channel
+            if getattr(self, "_yt_download_subfolder", None):
+                self._yt_offer_channel_creation()
+            else:
+                wx.MessageBox(msg, "Downloads Complete", wx.OK | wx.ICON_INFORMATION)
             return
 
         title, url = self._yt_download_queue[self._yt_download_idx]
         current = self._yt_download_idx + 1
         total = len(self._yt_download_queue)
 
-        self._yt_progress = wx.ProgressDialog(
-            f"Downloading ({current}/{total})",
-            f"Starting: {title}...",
-            maximum=100,
-            parent=self,
-            style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME
-        )
+        # Show/update a NON-modal progress dialog (does not block the event loop)
+        self._yt_show_progress_dialog(current, total, title)
+        msg = f"Downloading {current} of {total}: {title}..."
+        self.status_label.SetLabel(msg)
         speak(f"Downloading {current} of {total}: {title}")
+        self.logger.log_playback("YOUTUBE", f"Starting download {current}/{total}: {title}")
         threading.Thread(target=self._yt_download_thread, args=(title, url), daemon=True).start()
 
-    def _yt_download_thread(self, title, url):
+    def _yt_offer_channel_creation(self):
+        """Offer to create/update a channel from the downloaded YouTube files."""
+        subfolder = self._yt_download_subfolder
+        dest = self._yt_download_dest
+
+        result = wx.MessageBox(
+            f"Create a channel '{subfolder}' from the downloaded episodes?",
+            "Create Channel",
+            wx.YES_NO | wx.ICON_QUESTION
+        )
+        if result != wx.YES:
+            wx.MessageBox("Downloads complete.", "Done", wx.OK | wx.ICON_INFORMATION)
+            return
+
+        channel_name = subfolder
+
+        # Find all folders that contain MP3 files, sorted naturally
+        from playlist_manager import natural_sort_key
+        folders = []
+        for root, dirs, files in os.walk(dest):
+            dirs.sort(key=natural_sort_key)
+            if any(f.lower().endswith('.mp3') for f in files):
+                folders.append(root)
+
+        if not folders:
+            wx.MessageBox("No MP3 files found in downloaded content.", "No Files", wx.OK | wx.ICON_WARNING)
+            return
+
+        # Handle existing channel
+        if channel_name in self.channels.channels:
+            choice = wx.MessageBox(
+                f"Channel '{channel_name}' already exists.\n\nYes = Replace it\nNo = Add folders to it",
+                "Channel Exists",
+                wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION
+            )
+            if choice == wx.CANCEL:
+                return
+            elif choice == wx.YES:
+                self.channels.delete_channel(channel_name)
+                self.channels.create_channel(channel_name)
+                self.channels.update_current_channel(folders=folders)
+            else:
+                existing = self.channels.channels[channel_name].get('folders', [])
+                combined = existing + [f for f in folders if f not in existing]
+                self.channels.switch_channel(channel_name)
+                self.channels.update_current_channel(folders=combined)
+        else:
+            self.channels.create_channel(channel_name)
+            self.channels.update_current_channel(folders=folders)
+
+        # Load the new channel
+        self.playlist = PlaylistManager()
+        self._load_current_channel()
+        self._update_title()
+        self._update_display()
+
+        msg = f"Channel '{channel_name}' created with {len(folders)} folder(s)"
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self.logger.log_channel("YOUTUBE", "CHANNEL-CREATE", f"{channel_name} with {len(folders)} folders")
+
+    def _yt_show_progress_dialog(self, current, total, title):
+        """Create or update a non-modal progress dialog."""
+        if not getattr(self, "_yt_progress_dlg", None):
+            self._yt_progress_dlg = wx.Dialog(
+                self, title="YouTube Download", size=(460, 170),
+                style=wx.CAPTION | wx.RESIZE_BORDER
+            )
+            panel = wx.Panel(self._yt_progress_dlg)
+            sizer = wx.BoxSizer(wx.VERTICAL)
+
+            self._yt_progress_title = wx.StaticText(panel, label="")
+            sizer.Add(self._yt_progress_title, 0, wx.ALL | wx.EXPAND, 10)
+
+            self._yt_progress_gauge = wx.Gauge(panel, range=100)
+            sizer.Add(self._yt_progress_gauge, 0, wx.ALL | wx.EXPAND, 10)
+
+            self._yt_progress_status = wx.StaticText(panel, label="Starting...")
+            sizer.Add(self._yt_progress_status, 0, wx.ALL | wx.EXPAND, 10)
+
+            cancel_btn = wx.Button(panel, wx.ID_CANCEL, "Cancel")
+            cancel_btn.Bind(wx.EVT_BUTTON, self._on_yt_cancel_download)
+            sizer.Add(cancel_btn, 0, wx.ALL | wx.ALIGN_CENTER, 5)
+
+            panel.SetSizer(sizer)
+            self._yt_progress_dlg.Bind(wx.EVT_CLOSE, self._on_yt_cancel_download)
+            self._yt_cancel_requested = False
+            self._yt_progress_dlg.Show()
+
+        self._yt_progress_title.SetLabel(f"Downloading {current} of {total}:\n{title}")
+        self._yt_progress_gauge.SetValue(0)
+        self._yt_progress_status.SetLabel("Starting...")
+
+    def _yt_close_progress_dialog(self):
+        """Destroy the progress dialog if it exists."""
+        dlg = getattr(self, "_yt_progress_dlg", None)
+        if dlg:
+            dlg.Destroy()
+            self._yt_progress_dlg = None
+
+    def _on_yt_cancel_download(self, event):
+        """User cancelled the download."""
+        self._yt_cancel_requested = True
+        self._yt_close_progress_dialog()
+        # Clear the queue so no further items download
+        self._yt_download_idx = len(self._yt_download_queue)
+        self._yt_download_subfolder = None  # don't offer channel creation on cancel
+        self.status_label.SetLabel("Download cancelled")
+        speak("Download cancelled")
+        self.logger.log_playback("YOUTUBE", "Download cancelled by user")
+
+    def _yt_download_thread(self, title, url, _retry=False):
         try:
             def progress(percent, filename):
+                if getattr(self, "_yt_cancel_requested", False):
+                    raise _YTDownloadCancelled()
                 wx.CallAfter(self._yt_update_progress, percent, title)
 
             filepath = yt.download(url, destination=self._yt_download_dest, progress_callback=progress)
-            if filepath:
+            if filepath == "ALREADY":
+                self.logger.log_playback("YOUTUBE", f"Already downloaded, skipped: {title}")
+                wx.CallAfter(self._yt_download_skipped, title)
+            elif filepath:
                 wx.CallAfter(self._yt_download_complete, title, filepath)
             else:
-                wx.CallAfter(self._yt_error, f"Download failed: {title}")
+                wx.CallAfter(self._yt_error, f"Download failed (no file produced): {title}")
+        except _YTDownloadCancelled:
+            self.logger.log_playback("YOUTUBE", f"Download cancelled during: {title}")
+        except yt.VideoUnavailableError:
+            wx.CallAfter(
+                self._yt_error,
+                f"'{title}' can't be downloaded. It may be DRM-protected, removed, made "
+                f"private, age-restricted, or region-locked. This is a restriction on "
+                f"YouTube's side, not a problem with the app. Skipping it."
+            )
+        except RuntimeError as e:
+            # ffmpeg missing or similar setup problem
+            self.logger.log_error(f"YOUTUBE: {e} | tools dir: {yt.TOOLS_DIR} | exists: {yt.TOOLS_DIR.exists()}")
+            wx.CallAfter(self._yt_error, str(e))
         except Exception as e:
-            wx.CallAfter(self._yt_error, f"Download error for {title}: {e}")
+            self.logger.log_error(f"YOUTUBE: Download error for {title}: {e}")
+            # If the disk is full, free up OneDrive space and retry once.
+            if self._is_low_disk_error(e) and not _retry:
+                self.logger.log_error("YOUTUBE: low disk space — auto free-up-space then retry")
+                wx.CallAfter(self.status_label.SetLabel, "Disk full — freeing up space and retrying...")
+                speak("Disk is full. Freeing up space and trying again.")
+                freed = self._free_up_space_all_onedrive()
+                self.logger.log_playback("CLOUD", f"Auto free-up before YT retry freed: {freed}")
+                self._yt_download_thread(title, url, _retry=True)
+                return
+            if self._is_low_disk_error(e):
+                wx.CallAfter(self._yt_error,
+                             "Still out of disk space after freeing up room. Free space or move "
+                             "your YouTube download folder into OneDrive to make files online-only.")
+            else:
+                wx.CallAfter(self._yt_error, f"Download error for {title}: {e}")
 
     def _yt_update_progress(self, percent, title):
-        if hasattr(self, '_yt_progress') and self._yt_progress:
-            current = self._yt_download_idx + 1
-            total = len(self._yt_download_queue)
-            msg = f"({current}/{total}) {title}: {percent:.0f}%"
-            keep_going, _ = self._yt_progress.Update(int(min(percent, 99)), msg)
-            if not keep_going:
-                self._yt_progress.Destroy()
-                self._yt_progress = None
-                self.status_label.SetLabel("Download cancelled")
-                speak("Download cancelled")
+        # Update the progress dialog and status label
+        current = self._yt_download_idx + 1
+        total = len(self._yt_download_queue)
+        if getattr(self, "_yt_progress_dlg", None):
+            self._yt_progress_gauge.SetValue(int(min(max(percent, 0), 100)))
+            self._yt_progress_status.SetLabel(f"{percent:.0f}%")
+        self.status_label.SetLabel(f"Downloading {current} of {total}: {title} - {percent:.0f}%")
 
     def _yt_download_complete(self, title, filepath):
-        if hasattr(self, '_yt_progress') and self._yt_progress:
-            self._yt_progress.Destroy()
-            self._yt_progress = None
         self.status_label.SetLabel(f"Downloaded: {title}")
+        speak(f"Downloaded {title}")
+        self.logger.log_playback("YOUTUBE", f"Complete: {title} -> {filepath}")
+        self._yt_download_idx += 1
+        self._yt_download_next()
+
+    def _yt_download_skipped(self, title):
+        """A video that was already downloaded before — skipped, not an error."""
+        self.status_label.SetLabel(f"Already have: {title}")
         self._yt_download_idx += 1
         self._yt_download_next()
 
     def _yt_error(self, message):
-        if hasattr(self, '_yt_progress') and self._yt_progress:
-            self._yt_progress.Destroy()
-            self._yt_progress = None
         self.status_label.SetLabel(message)
         speak(message)
         self.logger.log_error(f"YOUTUBE: {message}")
+        # Move past the failed item and continue. Always route back through
+        # _yt_download_next so that when the queue is finished it still runs the
+        # completion logic (which offers to create a channel).
+        self._yt_download_idx += 1
+        wx.CallLater(1000, self._yt_download_next)
+
+    # ---- Live TV (iptv-org) ----
+
+    def _on_livetv_browse(self, event=None):
+        """Browse live channels by category."""
+        self.status_label.SetLabel("Loading live channel list...")
+        speak("Loading live channels")
+        threading.Thread(target=self._livetv_load_categories_thread, daemon=True).start()
+
+    def _livetv_load_categories_thread(self):
+        try:
+            livetv.refresh_catalog()
+            categories = livetv.get_categories()
+            wx.CallAfter(self._livetv_show_categories, categories)
+        except Exception as e:
+            wx.CallAfter(self._livetv_error, f"Could not load live channels: {e}")
+
+    def _livetv_show_categories(self, categories):
+        if not categories:
+            self._livetv_error("No live channels available.")
+            return
+        items = [f"{cat} ({count})" for cat, count in categories.items()]
+        dlg = wx.SingleChoiceDialog(self, "Choose a category:", "Live TV Categories", items)
+        if dlg.ShowModal() == wx.ID_OK:
+            idx = dlg.GetSelection()
+            category = list(categories.keys())[idx]
+            dlg.Destroy()
+            channels = livetv.get_channels_by_category(category)
+            self._livetv_show_channel_list(channels, f"Live TV - {category}")
+        else:
+            dlg.Destroy()
+
+    def _on_livetv_search(self, event=None):
+        """Search live channels by name."""
+        dlg = wx.TextEntryDialog(self, "Search live channels:", "Search Live TV")
+        if dlg.ShowModal() == wx.ID_OK:
+            query = dlg.GetValue().strip()
+            dlg.Destroy()
+            if query:
+                self.status_label.SetLabel(f"Searching live channels for {query}...")
+                speak("Searching")
+                threading.Thread(target=self._livetv_search_thread, args=(query,), daemon=True).start()
+        else:
+            dlg.Destroy()
+
+    def _livetv_search_thread(self, query):
+        try:
+            livetv.refresh_catalog()
+            results = livetv.search_channels(query)
+            wx.CallAfter(self._livetv_show_channel_list, results, f"Live TV search: {query}")
+        except Exception as e:
+            wx.CallAfter(self._livetv_error, f"Search error: {e}")
+
+    def _on_livetv_favorites(self, event=None):
+        """Show favorite live channels."""
+        self.status_label.SetLabel("Loading favorites...")
+        threading.Thread(target=self._livetv_favorites_thread, daemon=True).start()
+
+    def _livetv_favorites_thread(self):
+        try:
+            livetv.refresh_catalog()
+            channels = livetv.get_favorite_channels()
+            wx.CallAfter(self._livetv_show_channel_list, channels, "Live TV Favorites")
+        except Exception as e:
+            wx.CallAfter(self._livetv_error, f"Could not load favorites: {e}")
+
+    def _livetv_show_channel_list(self, channels, title):
+        if not channels:
+            self._livetv_error("No channels found.")
+            return
+
+        favs = set(livetv.get_favorites())
+        items = []
+        for c in channels:
+            star = "* " if c["id"] in favs else ""
+            cats = ", ".join(c["categories"]) if c["categories"] else ""
+            items.append(f"{star}{c['name']}" + (f" ({cats})" if cats else ""))
+
+        speak(f"Found {len(items)} channels")
+        dlg = wx.Dialog(self, title=title, size=(520, 420))
+        panel = wx.Panel(dlg)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(wx.StaticText(panel, label=f"Select a channel to play ({len(items)}):"), 0, wx.ALL, 6)
+        listbox = wx.ListBox(panel, choices=items, style=wx.LB_SINGLE)
+        if items:
+            listbox.SetSelection(0)
+        sizer.Add(listbox, 1, wx.ALL | wx.EXPAND, 6)
+
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        play_btn = wx.Button(panel, wx.ID_OK, "Play")
+        fav_btn = wx.Button(panel, label="Toggle Favorite")
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "Close")
+        row.Add(play_btn, 0, wx.RIGHT, 6)
+        row.Add(fav_btn, 0, wx.RIGHT, 6)
+        row.Add(cancel_btn, 0)
+        sizer.Add(row, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        panel.SetSizer(sizer)
+        listbox.SetFocus()
+
+        def on_fav(evt):
+            i = listbox.GetSelection()
+            if i == wx.NOT_FOUND:
+                return
+            ch = channels[i]
+            now_fav = livetv.toggle_favorite(ch["id"])
+            speak(f"{ch['name']} {'added to' if now_fav else 'removed from'} favorites")
+        fav_btn.Bind(wx.EVT_BUTTON, on_fav)
+
+        if dlg.ShowModal() == wx.ID_OK:
+            i = listbox.GetSelection()
+            dlg.Destroy()
+            if i != wx.NOT_FOUND:
+                self._livetv_play(channels[i])
+        else:
+            dlg.Destroy()
+
+    def _livetv_play(self, channel):
+        """Start playing a live channel's audio."""
+        # Stop any current MP3 playback and any existing live stream
+        try:
+            self.player.stop()
+            self.player.is_playing = False
+        except Exception:
+            pass
+        self._livetv_stop_stream()
+
+        name = channel["name"]
+        # Remember this as the active live channel so Space can resume it.
+        self._livetv_last_channel = channel
+        msg = f"Tuning in to {name}..."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self.logger.log_playback("LIVETV", f"Play: {name} ({channel['id']}) {channel['url']}")
+        try:
+            self.livetv_process = livetv.start_stream(channel["url"])
+            self._update_title()
+            self.SetTitle(f"AudioVault TV - LIVE: {name}")
+            self.status_label.SetLabel(f"Live: {name} (Space to pause, Ctrl+Shift+X to stop)")
+        except FileNotFoundError as e:
+            self._livetv_error(str(e))
+        except Exception as e:
+            self._livetv_error(f"Could not start stream: {e}")
+
+    def _on_livetv_stop(self, event=None):
+        # Explicit stop (menu / Ctrl+Shift+X) fully exits live mode, so Space
+        # afterward controls local playback again — not a live resume.
+        self._livetv_stop_stream()
+        self._livetv_last_channel = None
+        msg = "Live TV stopped"
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self._update_title()
+
+    def _livetv_stop_stream(self):
+        if self.livetv_process:
+            livetv.stop_stream(self.livetv_process)
+            self.livetv_process = None
+            # Fold the ffplay diagnostics into the main debug log so buffering
+            # info rides along with the normal "Upload Log" action.
+            self._livetv_capture_stream_diagnostics()
+
+    def _livetv_capture_stream_diagnostics(self):
+        """Read the ffplay stream log and summarize buffering-relevant lines
+        into the main logger."""
+        try:
+            path = getattr(livetv, "LIVETV_STREAM_LOG", None)
+            if not path or not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            keywords = ("reconnect", "buffer", "error", "timed out", "timeout",
+                        "503", "403", "404", "refused", "reset", "nal", "drop",
+                        "stall", "underrun", "retry", "failed", "url:", "started")
+            interesting = [ln.strip() for ln in lines
+                           if any(k in ln.lower() for k in keywords)]
+            if interesting:
+                sample = interesting[-40:]  # cap to avoid flooding the log
+                self.logger.log_playback("LIVETV-DIAG",
+                                         f"ffplay diagnostics ({len(interesting)} notable lines):")
+                for ln in sample:
+                    self.logger.log_playback("LIVETV-DIAG", ln)
+            else:
+                self.logger.log_playback("LIVETV-DIAG", "ffplay reported no buffering/error lines")
+        except Exception as e:
+            self.logger.log_error(f"LIVETV-DIAG capture failed: {e}")
+
+    def _on_livetv_refresh(self, event=None):
+        self.status_label.SetLabel("Refreshing live channel list...")
+        speak("Refreshing channel list")
+        threading.Thread(target=self._livetv_refresh_thread, daemon=True).start()
+
+    def _livetv_refresh_thread(self):
+        try:
+            count = livetv.refresh_catalog(force=True)
+            wx.CallAfter(self._livetv_refresh_done, count)
+        except Exception as e:
+            wx.CallAfter(self._livetv_error, f"Refresh failed: {e}")
+
+    def _livetv_refresh_done(self, count):
+        msg = f"Live channel list refreshed: {count} channels available."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+
+    def _livetv_error(self, message):
+        self.status_label.SetLabel(message)
+        speak(message)
+        self.logger.log_error(f"LIVETV: {message}")
 
     def _on_quick_quit(self, event):
         """Quit immediately without outro sound"""
@@ -2114,6 +3232,7 @@ class PlayerFrame(wx.Frame):
         
         self.player.stop()
         self.timer.Stop()
+        self._livetv_stop_stream()
         self.Destroy()
     
     def _on_close(self, event):
@@ -2131,6 +3250,7 @@ class PlayerFrame(wx.Frame):
         
         self.player.stop()
         self.timer.Stop()
+        self._livetv_stop_stream()
         
         # Play outro sound and wait for it to finish
         if self._play_outro_sound():

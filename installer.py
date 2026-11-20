@@ -29,6 +29,7 @@ FILES = [
     "player_logger.py",
     "audiovault_client.py",
     "youtube_client.py",
+    "livetv_client.py",
     "auto_updater.py",
     "requirements.txt",
     "README.md",

@@ -1,17 +1,34 @@
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
-MAX_BACKUPS = 5
+MAX_BACKUPS = 10
 
 class ChannelManager:
-    def __init__(self, channels_file):
+    def __init__(self, channels_file, logger=None):
         self.channels_file = Path(channels_file)
         self.backup_dir = self.channels_file.parent / ".channel_backups"
+        self.logger = logger
         self.channels = {}  # {channel_name: {folders: [], current_index: 0, position: 0}}
         self.current_channel = None
+        self._load_ok = True   # False if the last load failed (corrupt/unreadable file)
+        self._had_channels = False  # True if we successfully loaded channels this session
         self.load_channels()
+        # Snapshot the good file at startup, before anything can modify it
+        if self._load_ok and self.channels:
+            self._create_backup()
+        self._log(f"INIT - loaded {len(self.channels)} channels, load_ok={self._load_ok}")
+
+    def _log(self, message):
+        """Log a channel-manager event if a logger is available."""
+        if self.logger:
+            try:
+                self.logger.log_channel("MANAGER", "", message)
+            except Exception:
+                pass
     
     def _create_backup(self):
         """Create a backup of the current channels file"""
@@ -57,35 +74,117 @@ class ChannelManager:
                 data = json.load(f)
             if 'channels' not in data:
                 return False
-            # Replace current file
-            shutil.copy2(backup_path, self.channels_file)
-            # Reload
+            # Load the recovered data, then write it back safely
             self.channels = data.get('channels', {})
             self.current_channel = data.get('current_channel')
+            self._load_ok = True
+            self._had_channels = bool(self.channels)
+            self._write_atomic()
             return True
         except Exception:
             return False
     
     def load_channels(self):
-        """Load all channels from file"""
-        if self.channels_file.exists():
-            try:
-                with open(self.channels_file, 'r') as f:
-                    data = json.load(f)
-                    self.channels = data.get('channels', {})
-                    self.current_channel = data.get('current_channel')
-            except Exception as e:
-                print(f"Error loading channels: {e}")
-    
-    def save_channels(self):
-        """Save all channels to file"""
+        """Load all channels from file. If the file is corrupt, attempt to
+        recover from the most recent valid backup instead of starting empty."""
+        if not self.channels_file.exists():
+            # No file yet — this is a genuinely fresh start, empty is correct.
+            self._load_ok = True
+            self._had_channels = False
+            return
+
         try:
-            data = {
-                'channels': self.channels,
-                'current_channel': self.current_channel
-            }
-            with open(self.channels_file, 'w') as f:
+            with open(self.channels_file, 'r') as f:
+                data = json.load(f)
+            self.channels = data.get('channels', {})
+            self.current_channel = data.get('current_channel')
+            self._load_ok = True
+            self._had_channels = bool(self.channels)
+        except Exception as e:
+            # The file exists but is corrupt/unreadable. DO NOT start empty and
+            # let auto-save overwrite it — try to recover from a backup first.
+            print(f"Error loading channels (file may be corrupt): {e}")
+            self._log(f"LOAD FAILED - file may be corrupt: {e}")
+            self._load_ok = False
+            if self._recover_from_backup():
+                self._load_ok = True
+                self._had_channels = bool(self.channels)
+                self._log(f"RECOVERED {len(self.channels)} channels from backup")
+            else:
+                # Could not recover. Keep channels empty but mark load as failed
+                # so save_channels() refuses to overwrite the existing file.
+                self.channels = {}
+                self.current_channel = None
+                self._had_channels = False
+                self._log("RECOVERY FAILED - no valid backup found; save is locked to protect file")
+
+    def _recover_from_backup(self):
+        """Try to load the newest valid backup. Returns True on success."""
+        for backup_path, _ in self.get_backups():
+            try:
+                with open(backup_path, 'r') as f:
+                    data = json.load(f)
+                if 'channels' in data and data['channels']:
+                    self.channels = data['channels']
+                    self.current_channel = data.get('current_channel')
+                    print(f"Recovered channels from backup: {backup_path.name}")
+                    # Write the recovered data back safely
+                    self._write_atomic()
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _write_atomic(self):
+        """Write the channels file atomically (temp file + replace) so the real
+        file is never left truncated or half-written."""
+        data = {
+            'channels': self.channels,
+            'current_channel': self.current_channel,
+        }
+        self.channels_file.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a temp file in the same directory (required for atomic replace)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.channels_file.parent),
+            prefix=".channels_tmp_", suffix=".json"
+        )
+        try:
+            with os.fdopen(fd, 'w') as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            # Atomic on the same filesystem — the real file is only ever the
+            # complete old copy or the complete new copy, never a partial write.
+            os.replace(tmp_path, str(self.channels_file))
+        except Exception as e:
+            print(f"Error writing channels: {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+
+    def save_channels(self):
+        """Save all channels to file, with guards against destroying data."""
+        # Guard 1: if the last load failed, never overwrite the existing file —
+        # it may still contain the user's real data that we just couldn't parse.
+        if not self._load_ok:
+            print("Skipping save: previous load failed, refusing to overwrite channels file.")
+            self._log("SAVE BLOCKED - previous load failed, protecting existing file")
+            return
+
+        # Guard 2: never write an empty channel set over a file that previously
+        # had channels. This is the failure mode that wiped everything before.
+        if not self.channels and self._had_channels:
+            print("Skipping save: refusing to overwrite existing channels with an empty set.")
+            self._log("SAVE BLOCKED - refusing to overwrite channels with empty set")
+            return
+
+        try:
+            self._write_atomic()
+            if self.channels:
+                self._had_channels = True
         except Exception as e:
             print(f"Error saving channels: {e}")
     
@@ -112,6 +211,9 @@ class ChannelManager:
             if self.current_channel == name:
                 # Switch to first available channel or None
                 self.current_channel = next(iter(self.channels.keys())) if self.channels else None
+            # Intentional deletion: allow saving even if this empties the list.
+            if not self.channels:
+                self._had_channels = False
             self.save_channels()
             return True
         return False

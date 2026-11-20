@@ -6,6 +6,7 @@ Adapted for GUI integration.
 
 import io
 import os
+import time
 import configparser
 from urllib.parse import urljoin
 from pathlib import Path
@@ -44,6 +45,21 @@ def get_filename_from_header(header):
     msg = Message()
     msg["content-disposition"] = header
     return msg.get_filename()
+
+
+def sanitize_filename(name):
+    """Remove characters that are illegal in Windows filenames.
+    Windows forbids: < > : " / \\ | ? *  and control characters.
+    A colon (e.g. in 'Law and Order Toronto: Criminal Intent') otherwise
+    causes [Errno 22] Invalid argument when saving."""
+    if not name:
+        return name
+    illegal = '<>:"/\\|?*'
+    for ch in illegal:
+        name = name.replace(ch, "-")
+    # Collapse any run of spaces/dashes created by the replacement
+    name = name.strip().rstrip(". ")  # Windows also dislikes trailing dot/space
+    return name
 
 
 def login(email, password, log_file=None):
@@ -164,6 +180,9 @@ def download(url, destination=None, progress_callback=None):
     filename = get_filename_from_header(r.headers.get("content-disposition", ""))
     if not filename:
         return None
+    # Strip characters Windows won't allow in a filename (e.g. the ':' in
+    # "Law and Order Toronto: Criminal Intent") to avoid Errno 22.
+    filename = sanitize_filename(filename)
 
     if not destination:
         destination = str(DEFAULT_DOWNLOAD_DIR)
@@ -175,13 +194,50 @@ def download(url, destination=None, progress_callback=None):
     else:
         filepath = destination
 
-    so_far = 0
-    buffer_size = io.DEFAULT_BUFFER_SIZE
+    # Log the exact path we're about to write so we can diagnose Errno 22
+    try:
+        import logging
+        logging.getLogger('MP3Player').info(f"VAULT: Writing download to: {filepath!r}")
+    except Exception:
+        pass
 
-    with open(filepath, "wb") as f:
-        for chunk in r.iter_content(buffer_size):
-            f.write(chunk)
+    so_far = 0
+    # Use a modest fixed chunk size. Very large buffers to flaky USB/external
+    # drives can trigger "[Errno 22] Invalid argument" on write; smaller chunks
+    # with periodic flushing are far more reliable.
+    chunk_size = 256 * 1024  # 256 KB
+    bytes_since_flush = 0
+    flush_interval = 4 * 1024 * 1024  # flush to disk every ~4 MB
+
+    def _write_with_retry(f, data, attempts=5):
+        """Write a chunk, retrying briefly on transient OS write errors that
+        happen when an external drive hiccups mid-transfer."""
+        for attempt in range(attempts):
+            try:
+                f.write(data)
+                return
+            except OSError as err:
+                # Errno 22 and friends can be transient on USB drives.
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+
+    with open(filepath, "wb", buffering=0) as f:
+        for chunk in r.iter_content(chunk_size):
+            if not chunk:
+                continue
+            _write_with_retry(f, chunk)
             so_far += len(chunk)
+            bytes_since_flush += len(chunk)
+            # Periodically flush and fsync so data lands on the drive steadily
+            # instead of building up in a cache that can fail all at once.
+            if bytes_since_flush >= flush_interval:
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+                bytes_since_flush = 0
             percent = round((so_far / total_size) * 100, 2)
             if progress_callback:
                 progress_callback(percent, total_size, filename)

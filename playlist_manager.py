@@ -120,3 +120,15 @@ class PlaylistManager:
             self.current_index = index
             return True
         return False
+
+    def remove_current(self):
+        """Remove the current file from the playlist (in memory only).
+        Returns the removed filepath, or None if nothing to remove.
+        Leaves current_index pointing at the next file (or the new last file)."""
+        if not self.playlist or self.current_index >= len(self.playlist):
+            return None
+        folder_idx, filepath = self.playlist.pop(self.current_index)
+        # Keep current_index valid: if we removed the last item, step back one.
+        if self.current_index >= len(self.playlist):
+            self.current_index = max(0, len(self.playlist) - 1)
+        return filepath
