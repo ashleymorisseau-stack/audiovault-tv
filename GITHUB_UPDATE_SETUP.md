@@ -61,11 +61,15 @@ able to live in the repo at all — the updater is built to cope with that.
 
 ## What did not change
 
-- `main.py` was not changed. It still calls the same two functions,
-  `check_for_updates()` and `apply_updates()`, from `auto_updater.py`.
+- `main.py` still calls the same two functions, `check_for_updates()`
+  and `apply_updates()`, from `auto_updater.py`.
 - `upload_to_s3.py` and `S3_SETUP.md` have been deleted. There is no S3
   code left in the program at all.
 - The old `.update_etags.json` file (the S3 change-memory) is no longer
   used. You can delete it; leaving it there is harmless.
-- The log upload to S3 is gone too. The log file (`player_log.txt`) is
-  still saved on your computer for troubleshooting.
+- The log upload now goes to GitHub instead of S3. From the File menu,
+  **Upload Log** sends `player_log.txt` to `logs/<your name>_log.txt` in
+  this repo, with the same playback, navigation, and error information as
+  before. It needs a GitHub token saved in `github_token.txt` next to the
+  program (a fine-grained token for this repo with Contents read and
+  write). The token file is never pushed to GitHub.
