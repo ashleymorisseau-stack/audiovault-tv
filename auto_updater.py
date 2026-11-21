@@ -1,66 +1,42 @@
-"""Auto-updater that checks for updates on startup."""
+"""Auto-updater that checks for updates on GitHub.
 
-import os
-import json
+The program's files live in the public GitHub repo
+ashleymorisseau-stack/audiovault-tv, branch master. There is no S3 bucket
+and no AWS login needed any more.
+
+How it decides a file needs updating:
+  1. Ask GitHub for the repo's file list (the "tree"). Each file in the
+     list has a git blob SHA - a fingerprint of its exact contents.
+  2. Work out the same fingerprint for the file on this computer.
+  3. If the fingerprints differ, or the file is missing here, it needs
+     updating.
+
+Downloads come from raw.githubusercontent.com, and the downloaded file's
+fingerprint is checked against GitHub's before it replaces the local copy,
+so a bad or half-finished download never overwrites a good file.
+
+Some files in FILES_TO_SYNC are NOT in the GitHub repo (the sounds and the
+tools programs - the repo's .gitignore leaves them out, and GitHub refuses
+single files over 100 MB). Those files are simply skipped: the local copy
+is left alone and the update never fails because of them.
+
+If GitHub cannot be reached, check_for_updates() returns an empty list and
+apply_updates() returns an empty list, so the program just carries on
+playing normally. It never crashes the app.
+"""
+
 import hashlib
+import json
+import os
 import time
 import urllib.request
 from pathlib import Path
 
-BUCKET_NAME = "mp3-player-updates"
-S3_PREFIX = "mp3-player/"
-BASE_URL = f"https://{BUCKET_NAME}.s3.amazonaws.com/{S3_PREFIX}"
+REPO = "ashleymorisseau-stack/audiovault-tv"
+BRANCH = "master"
+TREE_URL = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
+RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/"
 LOCAL_DIR = Path(__file__).parent
-# Remembers the S3 ETag of each file we last saw, so we can detect changes
-# with a lightweight HEAD request instead of downloading the whole file.
-ETAG_CACHE = LOCAL_DIR / ".update_etags.json"
-
-
-def _fetch(url, dest):
-    """Download a URL to dest with cache-busting and no-cache headers so we
-    never get a stale copy from S3/CDN caches."""
-    bust = f"{'&' if '?' in url else '?'}_cb={int(time.time()*1000)}"
-    req = urllib.request.Request(
-        url + bust,
-        headers={
-            "Cache-Control": "no-cache, no-store, max-age=0",
-            "Pragma": "no-cache",
-            "User-Agent": "AudioVaultTV-Updater",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
-        f.write(resp.read())
-
-
-def _get_remote_signature(url):
-    """Return a lightweight change-signature (ETag or size) for a remote file
-    using an HTTP HEAD request. Does NOT download the file body."""
-    bust = f"{'&' if '?' in url else '?'}_cb={int(time.time()*1000)}"
-    req = urllib.request.Request(
-        url + bust,
-        method="HEAD",
-        headers={"Cache-Control": "no-cache", "User-Agent": "AudioVaultTV-Updater"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        etag = resp.headers.get("ETag")
-        size = resp.headers.get("Content-Length")
-        return (etag or "") + "|" + (size or "")
-
-
-def _load_etag_cache():
-    try:
-        with open(ETAG_CACHE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_etag_cache(cache):
-    try:
-        with open(ETAG_CACHE, "w") as f:
-            json.dump(cache, f)
-    except Exception:
-        pass
 
 FILES_TO_SYNC = [
     "main.py",
@@ -87,7 +63,74 @@ FILES_TO_SYNC = [
 ]
 
 
+def _git_blob_sha(data):
+    """Git fingerprint of file contents: sha1 of "blob <length>\\0" + data."""
+    head = b"blob %d\0" % len(data)
+    return hashlib.sha1(head + data).hexdigest()
+
+
+def _local_blob_sha(path):
+    """Git fingerprint of a local file, or None if it does not exist."""
+    if not os.path.exists(path):
+        return None
+    size = os.path.getsize(path)
+    sha = hashlib.sha1()
+    sha.update(b"blob %d\0" % size)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _fetch_tree():
+    """Return {path: git blob sha} for every file in the GitHub repo.
+
+    Returns None if GitHub cannot be reached or the answer is unusable.
+    """
+    req = urllib.request.Request(
+        TREE_URL,
+        headers={
+            "User-Agent": "AudioVaultTV-Updater",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            tree = json.load(resp)
+    except Exception:
+        return None
+    if not isinstance(tree, dict) or tree.get("truncated"):
+        # A truncated tree cannot be trusted to say which files changed.
+        return None
+    out = {}
+    for entry in tree.get("tree", []):
+        if entry.get("type") == "blob":
+            out[entry["path"]] = entry["sha"]
+    return out
+
+
+def _fetch(url, dest):
+    """Download a URL to dest with cache-busting and no-cache headers so we
+    never get a stale copy from a cache."""
+    bust = f"{'&' if '?' in url else '?'}_cb={int(time.time()*1000)}"
+    req = urllib.request.Request(
+        url + bust,
+        headers={
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "User-Agent": "AudioVaultTV-Updater",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
+        f.write(resp.read())
+
+
 def get_file_hash(filepath):
+    """MD5 hash of a file, or None if it does not exist.
+
+    Kept for compatibility with older callers; the updater itself compares
+    git blob fingerprints (see _local_blob_sha).
+    """
     if not os.path.exists(filepath):
         return None
     md5 = hashlib.md5()
@@ -97,70 +140,78 @@ def get_file_hash(filepath):
     return md5.hexdigest()
 
 
-def check_for_updates():
-    """Check which files have updates available using lightweight HEAD requests
-    (ETag/size). Returns list of filenames that need updating.
+def files_not_in_repo():
+    """Files from FILES_TO_SYNC that are not in the GitHub repo.
 
-    IMPORTANT: this does NOT modify the ETag cache. The cache is only updated
-    in apply_updates(), once a file has actually been downloaded and applied.
-    (Previously the check wrote the new signature immediately, which meant a
-    declined or failed update would be silently 'forgotten' and never offered
-    again.)
+    These are left alone by the updater. Returns [] if GitHub cannot be
+    reached (we simply do not know, so we claim nothing).
     """
+    tree = _fetch_tree()
+    if tree is None:
+        return []
+    return [name for name in FILES_TO_SYNC if name not in tree]
+
+
+def check_for_updates():
+    """Check which files have updates available on GitHub.
+
+    Returns a list of filenames that need updating. Returns an empty list
+    if GitHub cannot be reached, so the program just carries on normally.
+    Files that are not in the GitHub repo are never listed.
+    """
+    tree = _fetch_tree()
+    if tree is None:
+        return []
+
     available = []
-    etag_cache = _load_etag_cache()
-
     for filename in FILES_TO_SYNC:
-        local_path = LOCAL_DIR / filename
-        file_url = f"{BASE_URL}{filename}"
-
-        try:
-            remote_sig = _get_remote_signature(file_url)
-        except Exception:
-            # If HEAD fails, skip this file rather than forcing a slow download
+        remote_sha = tree.get(filename)
+        if remote_sha is None:
+            # Not in the GitHub repo (sounds, tools programs). Leave the
+            # local copy alone and do not offer it as an update.
             continue
-
-        cached_sig = etag_cache.get(filename)
-
-        # A file needs updating if:
-        #  - it doesn't exist locally, OR
-        #  - we have no recorded signature for it (never applied), OR
-        #  - the remote signature differs from the last APPLIED signature.
-        if not local_path.exists():
-            available.append(filename)
-        elif cached_sig is None or cached_sig != remote_sig:
+        local_path = LOCAL_DIR / filename
+        if not local_path.exists() or _local_blob_sha(local_path) != remote_sha:
             available.append(filename)
 
     return available
 
 
 def apply_updates(filenames):
-    """Download and apply updates for the given filenames. Returns list of updated filenames."""
-    updated = []
-    etag_cache = _load_etag_cache()
+    """Download and apply updates for the given filenames.
 
+    Each download is checked against GitHub's fingerprint before it
+    replaces the local file. Returns the list of filenames actually
+    updated. Files not in the GitHub repo are skipped, never deleted.
+    Returns an empty list if GitHub cannot be reached.
+    """
+    tree = _fetch_tree()
+    if tree is None:
+        return []
+
+    updated = []
     for filename in filenames:
+        remote_sha = tree.get(filename)
+        if remote_sha is None:
+            # Not in the GitHub repo - never touch or delete the local copy.
+            continue
         local_path = LOCAL_DIR / filename
-        file_url = f"{BASE_URL}{filename}"
         temp_path = LOCAL_DIR / f"{filename}.tmp"
 
         try:
             temp_path.parent.mkdir(parents=True, exist_ok=True)
-            _fetch(file_url, str(temp_path))
+            _fetch(RAW_BASE + filename, str(temp_path))
+
+            # Only replace the local file if the download matches GitHub.
+            if _local_blob_sha(temp_path) != remote_sha:
+                raise ValueError("downloaded file does not match GitHub")
 
             if local_path.exists():
                 os.remove(str(local_path))
             os.rename(str(temp_path), str(local_path))
             updated.append(filename)
-
-            # Record the new signature so we don't re-flag it next launch
-            try:
-                etag_cache[filename] = _get_remote_signature(file_url)
-            except Exception:
-                pass
         except Exception:
             if temp_path.exists():
                 os.remove(str(temp_path))
 
-    _save_etag_cache(etag_cache)
     return updated

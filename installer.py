@@ -1,9 +1,11 @@
 """
 AudioVault TV Installer
-Downloads and installs all program files with a GUI progress display.
-Requires: pip install wxPython requests
+Downloads and installs all program files from GitHub with a GUI progress display.
+Requires: pip install wxPython
 """
 
+import hashlib
+import json
 import os
 import sys
 import threading
@@ -18,7 +20,10 @@ except ImportError:
     import wx
 
 INSTALL_DIR = Path.home() / "AudioVault TV"
-BASE_URL = "https://mp3-player-updates.s3.amazonaws.com/mp3-player/"
+REPO = "ashleymorisseau-stack/audiovault-tv"
+BRANCH = "master"
+TREE_URL = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
+RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/"
 
 FILES = [
     "main.py",
@@ -41,6 +46,37 @@ FILES = [
     "tools/ffmpeg.exe",
     "tools/ffprobe.exe",
 ]
+
+
+def _fetch_tree():
+    """Return {path: git blob sha} for every file in the GitHub repo.
+
+    Returns None if GitHub cannot be reached or the answer is unusable.
+    """
+    req = urllib.request.Request(
+        TREE_URL,
+        headers={
+            "User-Agent": "AudioVaultTV-Updater",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            tree = json.load(resp)
+    except Exception:
+        return None
+    if not isinstance(tree, dict) or tree.get("truncated"):
+        return None
+    out = {}
+    for entry in tree.get("tree", []):
+        if entry.get("type") == "blob":
+            out[entry["path"]] = entry["sha"]
+    return out
+
+
+def _git_blob_sha(data):
+    """Git fingerprint of file contents: sha1 of "blob <length>\\0" + data."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 class InstallerFrame(wx.Frame):
@@ -96,22 +132,61 @@ class InstallerFrame(wx.Frame):
             (INSTALL_DIR / "tools").mkdir(exist_ok=True)
             (INSTALL_DIR / "Downloads").mkdir(exist_ok=True)
 
+            # Get the file list from GitHub first
+            self._set_status("Getting the file list from GitHub...")
+            self._log("Getting the file list from GitHub...")
+            tree = _fetch_tree()
+            if tree is None:
+                self._set_status("Could not reach GitHub - try again later")
+                self._log("")
+                self._log("Could not reach GitHub. Please check your internet "
+                          "connection and try again.")
+                wx.CallAfter(self.install_btn.Enable, True)
+                return
+
             # Download files
             total = len(FILES)
+            installed = 0
+            skipped = []
             for i, filename in enumerate(FILES):
                 pct = int(((i) / total) * 90)
                 self._set_progress(pct)
                 self._set_status(f"Downloading: {filename}")
-                self._log(f"Downloading {filename}...")
 
-                url = BASE_URL + filename
+                # Some files are not in the GitHub repo (the sounds and the
+                # tools programs). Skip them and say so plainly.
+                remote_sha = tree.get(filename)
+                if remote_sha is None:
+                    self._log(f"Not in the GitHub repo, skipped: {filename}")
+                    skipped.append(filename)
+                    continue
+
+                self._log(f"Downloading {filename}...")
+                url = RAW_BASE + filename
                 dest = INSTALL_DIR / filename
                 dest.parent.mkdir(parents=True, exist_ok=True)
 
                 try:
-                    urllib.request.urlretrieve(url, str(dest))
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "Cache-Control": "no-cache, no-store, max-age=0",
+                            "Pragma": "no-cache",
+                            "User-Agent": "AudioVaultTV-Updater",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        data = resp.read()
+                    # Only trust the download if it matches GitHub exactly
+                    if _git_blob_sha(data) != remote_sha:
+                        self._log(f"  WARNING: Download did not match GitHub, skipped: {filename}")
+                        skipped.append(filename)
+                        continue
+                    dest.write_bytes(data)
+                    installed += 1
                 except Exception as e:
                     self._log(f"  WARNING: Failed to download {filename}: {e}")
+                    skipped.append(filename)
 
             # Create desktop shortcut
             self._set_progress(95)
@@ -127,6 +202,13 @@ class InstallerFrame(wx.Frame):
             self._log("=" * 40)
             self._log("Installation complete!")
             self._log(f"Program installed to: {INSTALL_DIR}")
+            self._log(f"Installed {installed} files from GitHub.")
+            if skipped:
+                self._log("")
+                self._log("These files are not on GitHub, so they were not installed:")
+                for name in skipped:
+                    self._log(f"  - {name}")
+                self._log("Copy them from your old AudioVault TV folder if you need them.")
             self._log("Double-click 'AudioVault TV' on your desktop to run.")
             self._log("")
             self._log("Note: For voice control, download the Vosk model:")
