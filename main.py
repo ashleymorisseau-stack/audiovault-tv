@@ -68,6 +68,12 @@ class _YTDownloadCancelled(Exception):
     pass
 
 
+class _BackgroundDownloadCancelled(Exception):
+    """Raised inside a download progress callback to stop a background
+    download when Honey asks to cancel downloads (no pop-up window)."""
+    pass
+
+
 class PlayerFrame(wx.Frame):
     def __init__(self):
         import time
@@ -104,6 +110,15 @@ class PlayerFrame(wx.Frame):
         self.livetv_process = None  # Live TV stream subprocess
         self._livetv_last_channel = None  # last live channel, for Space resume
         self._livetv_fallback_in_progress = False  # Live TV fallback is loading in the background
+
+        # Background downloads: downloads run in a worker thread with no
+        # pop-up window, so playback, Live TV and the menus keep working
+        # while a download runs. Progress is kept here so Honey can ask
+        # for a spoken download status at any time.
+        self.download_progress = None  # no download dialog is shown any more
+        self._bg_vault_percent = 0
+        self._bg_yt_percent = 0
+        self._bg_cancel_requested = False
         
         self._create_ui()
         self._bind_hotkeys()
@@ -232,6 +247,11 @@ class PlayerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self._on_vault_recents(e, "movies"), recent_movies_item)
         recent_shows_item = vault_menu.Append(wx.ID_ANY, "Recent TV Shows\tCtrl+Shift+N", "View recently added shows")
         self.Bind(wx.EVT_MENU, lambda e: self._on_vault_recents(e, "shows"), recent_shows_item)
+        vault_menu.AppendSeparator()
+        download_status_item = vault_menu.Append(wx.ID_ANY, "Download Status", "Hear what is downloading in the background right now")
+        self.Bind(wx.EVT_MENU, self._on_download_status, download_status_item)
+        cancel_downloads_item = vault_menu.Append(wx.ID_ANY, "Cancel Downloads", "Stop any downloads running in the background")
+        self.Bind(wx.EVT_MENU, self._on_cancel_downloads, cancel_downloads_item)
         menubar.Append(vault_menu, "&AudioVault")
         
         # YouTube menu
@@ -243,6 +263,8 @@ class PlayerFrame(wx.Frame):
             self.Bind(wx.EVT_MENU, self._on_yt_url, yt_url_item)
             yt_folder_item = yt_menu.Append(wx.ID_ANY, "Set Download Folder", "Set default YouTube download folder")
             self.Bind(wx.EVT_MENU, self._on_yt_set_folder, yt_folder_item)
+            yt_status_item = yt_menu.Append(wx.ID_ANY, "Download Status", "Hear what is downloading in the background right now")
+            self.Bind(wx.EVT_MENU, self._on_download_status, yt_status_item)
             yt_menu.AppendSeparator()
             yt_update_item = yt_menu.Append(wx.ID_ANY, "Update YouTube Downloader", "Update yt-dlp to fix download issues")
             self.Bind(wx.EVT_MENU, self._on_yt_update, yt_update_item)
@@ -1225,6 +1247,12 @@ class PlayerFrame(wx.Frame):
             else:
                 self._on_vault_search(None, kind="shows")
             msg = f"Command recognized: {text}"
+        elif command == 'download_status':
+            # _on_download_status already speaks the status; return here
+            # so the generic "Command recognized" message does not talk
+            # over it or replace it in the status line.
+            self._on_download_status()
+            return
         elif command == 'download':
             self._on_vault_recents(None, kind="movies")
             msg = f"Command recognized: {text}"
@@ -2053,6 +2081,62 @@ class PlayerFrame(wx.Frame):
         except Exception as e:
             wx.CallAfter(self._vault_error, f"Error loading recents: {e}")
     
+    # ---- Background downloads: status and cancel ----
+    def _bg_download_status_text(self):
+        """Plain-words status of any downloads running in the background.
+
+        Reads the Audio Vault and YouTube queues only; it never starts,
+        stops or changes a download, so it is safe to call any time,
+        including while something is playing.
+        """
+        parts = []
+        queue = getattr(self, "download_queue", None) or []
+        idx = getattr(self, "download_queue_index", 0)
+        if idx < len(queue):
+            name = queue[idx][0]
+            waiting = len(queue) - idx - 1
+            text = (f"Audio Vault is downloading {name} in the background, "
+                    f"{getattr(self, '_bg_vault_percent', 0):.0f} percent done")
+            if waiting:
+                text += f", with {waiting} more waiting"
+            parts.append(text)
+        yt_queue = getattr(self, "_yt_download_queue", None) or []
+        yt_idx = getattr(self, "_yt_download_idx", 0)
+        if yt_idx < len(yt_queue):
+            title = yt_queue[yt_idx][0]
+            waiting = len(yt_queue) - yt_idx - 1
+            text = (f"YouTube is downloading {title} in the background, "
+                    f"{getattr(self, '_bg_yt_percent', 0):.0f} percent done")
+            if waiting:
+                text += f", with {waiting} more waiting"
+            parts.append(text)
+        if not parts:
+            return "No downloads are running right now."
+        return ". ".join(parts) + ". You can keep listening while they download."
+
+    def _on_download_status(self, event=None):
+        """Speak (and show) what is downloading in the background."""
+        msg = self._bg_download_status_text()
+        self.status_label.SetLabel(msg)
+        speak(msg)
+
+    def _on_cancel_downloads(self, event=None):
+        """Stop any background downloads.
+
+        Sets the cancel flag the download threads check, and clears both
+        queues so nothing new starts. The download already in progress
+        stops shortly after, on its own, and says so out loud.
+        """
+        self._bg_cancel_requested = True
+        self._yt_cancel_requested = True
+        if getattr(self, "download_queue", None):
+            self.download_queue_index = len(self.download_queue)
+        if getattr(self, "_yt_download_queue", None):
+            self._yt_download_idx = len(self._yt_download_queue)
+        msg = "Cancelling downloads. The one already downloading will stop shortly."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+
     def _vault_show_results(self, results, kind):
         """Show search/recent results and allow multiple downloads"""
         if not results:
@@ -2109,6 +2193,8 @@ class PlayerFrame(wx.Frame):
             self.download_queue = [(results[i][1], results[i][2]) for i in selections]
             self.download_create_channel = False
             self.download_subfolder = None
+            self._bg_cancel_requested = False
+            self._bg_vault_percent = 0
             
             # If multiple items, offer subfolder grouping
             if len(selections) > 1:
@@ -2185,6 +2271,8 @@ class PlayerFrame(wx.Frame):
             self.download_queue = [(name, download_url)]
             self.download_dest = dest
             self.download_queue_index = 0
+            self._bg_cancel_requested = False
+            self._bg_vault_percent = 0
             self._vault_download_next()
         else:
             dlg.Destroy()
@@ -2209,9 +2297,21 @@ class PlayerFrame(wx.Frame):
             return False
 
     def _vault_download_next(self):
-        """Download next item in queue"""
+        """Download next item in queue, in the background.
+
+        Returns right away after starting the worker thread: there is no
+        pop-up window any more, so playback, Live TV and the menus keep
+        working while the download runs. Progress is shown in the status
+        line and can be heard with Download Status.
+        """
         if self.download_queue_index >= len(self.download_queue):
             total = len(self.download_queue)
+            if getattr(self, "_bg_cancel_requested", False):
+                self._bg_cancel_requested = False
+                msg = "Downloads cancelled"
+                self.status_label.SetLabel(msg)
+                speak(msg)
+                return
             msg = f"All {total} download(s) complete"
             self.status_label.SetLabel(msg)
             speak(msg)
@@ -2223,10 +2323,8 @@ class PlayerFrame(wx.Frame):
             # Offer channel creation if downloaded to subfolder
             if self.download_subfolder:
                 self._vault_offer_channel_creation()
-            else:
-                wx.MessageBox(msg, "Downloads Complete", wx.OK | wx.ICON_INFORMATION)
             return
-        
+
         name, url = self.download_queue[self.download_queue_index]
         current = self.download_queue_index + 1
         total = len(self.download_queue)
@@ -2242,16 +2340,16 @@ class PlayerFrame(wx.Frame):
             wx.CallLater(50, self._vault_download_next)
             return
 
-        self.download_progress = wx.ProgressDialog(
-            f"Downloading ({current}/{total})",
-            f"Starting: {name}...",
-            maximum=100,
-            parent=self,
-            style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME
-        )
-        
-        speak(f"Downloading {current} of {total}: {name}")
-        
+        # No pop-up window: the download runs in the background and the
+        # status line shows its progress instead.
+        self.download_progress = None
+        self._bg_vault_percent = 0
+        self.status_label.SetLabel(f"Downloading in the background ({current}/{total}): {name}")
+        if current == 1:
+            speak(f"Downloading {current} of {total}: {name}. Downloading in the background, so you can keep listening.")
+        else:
+            speak(f"Downloading {current} of {total}: {name}")
+
         thread = threading.Thread(
             target=self._vault_download_thread,
             args=(name, url, self.download_dest),
@@ -2273,17 +2371,31 @@ class PlayerFrame(wx.Frame):
                 return
 
             def progress(percent, total_size, filename):
+                if getattr(self, "_bg_cancel_requested", False):
+                    raise _BackgroundDownloadCancelled()
+                self._bg_vault_percent = percent
                 wx.CallAfter(self._vault_update_progress, percent, total_size, filename)
 
             filepath = av.download(download_url, destination=destination, progress_callback=progress)
 
             if filepath:
                 self.logger.log_channel("VAULT", "DOWNLOAD", f"Complete: {filepath}")
-                wx.CallAfter(self._vault_download_complete, name, filepath)
+                # Extract ZIPs here, in this background thread, so a big
+                # extraction does not freeze playback or the menus either.
+                # Only plain file work happens here; the spoken result is
+                # given on the main thread by _vault_download_complete.
+                extracted = None
+                if filepath.lower().endswith('.zip'):
+                    extracted = self._vault_extract_zip_files(name, filepath)
+                wx.CallAfter(self._vault_download_complete, name, filepath, extracted)
             else:
                 self.logger.log_error(f"VAULT DOWNLOAD FAILED: {name} - returned None")
                 self.vault_logged_in = False
                 wx.CallAfter(self._vault_download_failed, f"Download failed for {name}. Session may have expired.")
+        except _BackgroundDownloadCancelled:
+            self.logger.log_channel("VAULT", "CANCEL", f"Download cancelled: {name}")
+            self._cleanup_partial_download(name, destination)
+            wx.CallAfter(self._vault_download_cancelled)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -2395,63 +2507,78 @@ class PlayerFrame(wx.Frame):
         return f"Download error: {e}"
     
     def _vault_update_progress(self, percent, total_size, filename):
-        """Update download progress dialog"""
-        if hasattr(self, 'download_progress') and self.download_progress:
-            current = self.download_queue_index + 1
-            total = len(self.download_queue)
-            msg = f"({current}/{total}) {filename}: {percent:.0f}% of {av.bytes2human(total_size)}"
-            keep_going, _ = self.download_progress.Update(int(percent), msg)
-            if not keep_going:
-                self.download_progress.Destroy()
-                self.download_progress = None
-                self.status_label.SetLabel("Download cancelled")
-                speak("Download cancelled")
-    
-    def _vault_download_complete(self, name, filepath):
-        """Handle completed download, extract if ZIP, move to next in queue"""
-        if hasattr(self, 'download_progress') and self.download_progress:
-            self.download_progress.Destroy()
-            self.download_progress = None
-        
+        """Show background download progress in the status line only.
+
+        There is no pop-up window any more, and nothing is spoken here:
+        speaking every percent would talk over whatever Honey is
+        listening to. Start, finish and failure are spoken instead.
+        """
+        self._bg_vault_percent = percent
+        current = self.download_queue_index + 1
+        total = len(self.download_queue)
+        msg = f"Downloading in the background ({current}/{total}) {filename}: {percent:.0f}% of {av.bytes2human(total_size)}"
+        self.status_label.SetLabel(msg)
+
+    def _vault_download_cancelled(self):
+        """A background Audio Vault download was cancelled by Honey."""
+        self.download_progress = None
+        self._bg_cancel_requested = False
+        self.status_label.SetLabel("Download cancelled")
+        speak("Download cancelled")
+
+    def _vault_download_complete(self, name, filepath, extracted=None):
+        """Handle completed download, extract if ZIP, move to next in queue.
+
+        `extracted` is True/False when the background thread already
+        extracted a ZIP; None means no ZIP was involved (or an older
+        caller did not extract yet, in which case extract here).
+        """
+        self.download_progress = None
+
         # Check if ZIP and extract
         if filepath and filepath.lower().endswith('.zip'):
-            extracted = self._vault_extract_zip(name, filepath)
+            if extracted is None:
+                extracted = self._vault_extract_zip(name, filepath)
             if extracted:
                 msg = f"Extracted: {name}"
             else:
                 msg = f"Downloaded (extraction failed): {name}"
         else:
             msg = f"Downloaded: {name}"
-        
+
         self.status_label.SetLabel(msg)
+        speak(msg)
         self.download_queue_index += 1
-        
+
         # Download next in queue
         self._vault_download_next()
     
-    def _vault_extract_zip(self, name, zip_path):
-        """Extract ZIP file, flatten duplicate folders, and clean up"""
+    def _vault_extract_zip_files(self, name, zip_path):
+        """Filesystem-only ZIP extraction. Returns True on success.
+
+        No speaking and no window updates happen here, so it is safe to
+        call from the background download thread. The spoken result is
+        given by _vault_download_complete on the main thread.
+        """
         import zipfile
         import shutil
-        
+
         try:
             if not zipfile.is_zipfile(zip_path):
                 self.logger.log_error(f"VAULT: Not a valid ZIP: {zip_path}")
                 return False
-            
+
             # Extract to folder named after the show (sanitize illegal chars
             # like ':' so Windows doesn't reject the folder name)
             safe_name = av.sanitize_filename(name)
             extract_dir = os.path.join(os.path.dirname(zip_path), safe_name)
             os.makedirs(extract_dir, exist_ok=True)
-            
-            speak(f"Extracting {name}")
-            self.status_label.SetLabel(f"Extracting: {name}...")
+
             self.logger.log_channel("VAULT", "EXTRACT", f"Extracting {zip_path} to {extract_dir}")
-            
+
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 zf.extractall(extract_dir)
-            
+
             # Handle nested ZIPs
             for root, dirs, files in os.walk(extract_dir):
                 for f in files:
@@ -2462,7 +2589,7 @@ class PlayerFrame(wx.Frame):
                         with zipfile.ZipFile(nested_path, 'r') as nzf:
                             nzf.extractall(nested_dir)
                         os.remove(nested_path)
-            
+
             # Flatten duplicate nested folders (e.g., Season 1/Season 1/ -> Season 1/)
             for root, dirs, files in os.walk(extract_dir, topdown=False):
                 for d in dirs:
@@ -2477,18 +2604,31 @@ class PlayerFrame(wx.Frame):
                                     shutil.move(os.path.join(inner, item), dir_path)
                                 os.rmdir(inner)
                                 self.logger.log_channel("VAULT", "EXTRACT", f"Flattened: {d}/{contents[0]}")
-            
+
             # Delete original ZIP
             os.remove(zip_path)
-            
+
             self.logger.log_channel("VAULT", "EXTRACT", f"Extraction complete: {extract_dir}")
-            speak(f"Extracted {name}")
             return True
-            
+
         except Exception as e:
             self.logger.log_error(f"VAULT EXTRACT ERROR: {name} - {e}")
-            speak("Extraction failed")
             return False
+
+    def _vault_extract_zip(self, name, zip_path):
+        """Extract ZIP file on the main thread, speaking the result.
+
+        Kept for callers that run on the main thread; the background
+        download thread uses _vault_extract_zip_files instead.
+        """
+        self.status_label.SetLabel(f"Extracting: {name}...")
+        speak(f"Extracting {name}")
+        ok = self._vault_extract_zip_files(name, zip_path)
+        if ok:
+            speak(f"Extracted {name}")
+        else:
+            speak("Extraction failed")
+        return ok
     
     def _vault_offer_channel_creation(self):
         """Offer to create a channel from downloaded content"""
@@ -2572,14 +2712,17 @@ class PlayerFrame(wx.Frame):
         self._start_playback()
     
     def _vault_download_failed(self, message):
-        """Handle failed download with error dialog"""
-        if hasattr(self, 'download_progress') and self.download_progress:
-            self.download_progress.Destroy()
-            self.download_progress = None
-        
-        self.status_label.SetLabel("Download failed")
-        speak("Download failed")
-        wx.MessageBox(message, "Download Failed", wx.OK | wx.ICON_ERROR)
+        """Handle a failed download without stopping the whole queue.
+
+        No pop-up window any more: the failure is spoken in plain words,
+        shown in the status line, and the queue moves on to the next
+        download so one bad item does not stall everything.
+        """
+        self.download_progress = None
+        self.status_label.SetLabel(f"Download failed: {message}")
+        speak(f"Sorry, that download did not work. {message} Moving on to the next one.")
+        self.download_queue_index += 1
+        self._vault_download_next()
     
     def _vault_error(self, message):
         """Handle AudioVault errors"""
@@ -2701,6 +2844,8 @@ class PlayerFrame(wx.Frame):
 
         self._yt_download_dest = dest
         self._yt_download_idx = 0
+        self._bg_cancel_requested = False
+        self._bg_yt_percent = 0
         speak(f"Queued {len(self._yt_download_queue)} download{'s' if len(self._yt_download_queue) > 1 else ''}")
         self._yt_download_next()
 
@@ -2844,16 +2989,29 @@ class PlayerFrame(wx.Frame):
             self._yt_download_queue = [(results[i]["title"], results[i]["url"]) for i in selections]
             self._yt_download_dest = dest
             self._yt_download_idx = 0
+            self._bg_cancel_requested = False
+            self._bg_yt_percent = 0
             speak(f"Queued {len(self._yt_download_queue)} downloads")
             self._yt_download_next()
         else:
             dlg.Destroy()
 
     def _yt_download_next(self):
-        """Download next item in YouTube queue"""
+        """Download next item in YouTube queue, in the background.
+
+        Returns right away after starting the worker thread: there is no
+        pop-up window any more, so playback, Live TV and the menus keep
+        working while the download runs.
+        """
         if self._yt_download_idx >= len(self._yt_download_queue):
             total = len(self._yt_download_queue)
             self._yt_close_progress_dialog()
+            if getattr(self, "_bg_cancel_requested", False):
+                self._bg_cancel_requested = False
+                msg = "Downloads cancelled"
+                self.status_label.SetLabel(msg)
+                speak(msg)
+                return
             msg = f"All {total} YouTube download(s) complete"
             self.status_label.SetLabel(msg)
             speak(msg)
@@ -2862,19 +3020,18 @@ class PlayerFrame(wx.Frame):
             # If everything was grouped into a subfolder, offer to make a channel
             if getattr(self, "_yt_download_subfolder", None):
                 self._yt_offer_channel_creation()
-            else:
-                wx.MessageBox(msg, "Downloads Complete", wx.OK | wx.ICON_INFORMATION)
             return
 
         title, url = self._yt_download_queue[self._yt_download_idx]
         current = self._yt_download_idx + 1
         total = len(self._yt_download_queue)
 
-        # Show/update a NON-modal progress dialog (does not block the event loop)
+        # Background progress only: no pop-up window, so the download
+        # does not steal focus while Honey keeps listening.
         self._yt_show_progress_dialog(current, total, title)
         msg = f"Downloading {current} of {total}: {title}..."
         self.status_label.SetLabel(msg)
-        speak(f"Downloading {current} of {total}: {title}")
+        speak(f"Downloading {current} of {total}: {title}. Downloading in the background, so you can keep listening.")
         self.logger.log_playback("YOUTUBE", f"Starting download {current}/{total}: {title}")
         threading.Thread(target=self._yt_download_thread, args=(title, url), daemon=True).start()
 
@@ -2940,59 +3097,33 @@ class PlayerFrame(wx.Frame):
         self.logger.log_channel("YOUTUBE", "CHANNEL-CREATE", f"{channel_name} with {len(folders)} folders")
 
     def _yt_show_progress_dialog(self, current, total, title):
-        """Create or update a non-modal progress dialog."""
-        if not getattr(self, "_yt_progress_dlg", None):
-            self._yt_progress_dlg = wx.Dialog(
-                self, title="YouTube Download", size=(460, 170),
-                style=wx.CAPTION | wx.RESIZE_BORDER
-            )
-            panel = wx.Panel(self._yt_progress_dlg)
-            sizer = wx.BoxSizer(wx.VERTICAL)
+        """Record background YouTube progress without opening a window.
 
-            self._yt_progress_title = wx.StaticText(panel, label="")
-            sizer.Add(self._yt_progress_title, 0, wx.ALL | wx.EXPAND, 10)
-
-            self._yt_progress_gauge = wx.Gauge(panel, range=100)
-            sizer.Add(self._yt_progress_gauge, 0, wx.ALL | wx.EXPAND, 10)
-
-            self._yt_progress_status = wx.StaticText(panel, label="Starting...")
-            sizer.Add(self._yt_progress_status, 0, wx.ALL | wx.EXPAND, 10)
-
-            cancel_btn = wx.Button(panel, wx.ID_CANCEL, "Cancel")
-            cancel_btn.Bind(wx.EVT_BUTTON, self._on_yt_cancel_download)
-            sizer.Add(cancel_btn, 0, wx.ALL | wx.ALIGN_CENTER, 5)
-
-            panel.SetSizer(sizer)
-            self._yt_progress_dlg.Bind(wx.EVT_CLOSE, self._on_yt_cancel_download)
-            self._yt_cancel_requested = False
-            self._yt_progress_dlg.Show()
-
-        self._yt_progress_title.SetLabel(f"Downloading {current} of {total}:\n{title}")
-        self._yt_progress_gauge.SetValue(0)
-        self._yt_progress_status.SetLabel("Starting...")
+        The old pop-up progress window is gone on purpose: it stole
+        focus while Honey was listening. Progress now lives in the
+        status line (see _yt_update_progress) and can be heard any time
+        with Download Status. Kept under this name so existing callers
+        do not change.
+        """
+        self._bg_yt_percent = 0
+        self._yt_progress_dlg = None
+        self.status_label.SetLabel(f"Downloading in the background {current} of {total}: {title} - 0%")
 
     def _yt_close_progress_dialog(self):
-        """Destroy the progress dialog if it exists."""
+        """Destroy the progress dialog if one exists (none is shown now)."""
         dlg = getattr(self, "_yt_progress_dlg", None)
         if dlg:
             dlg.Destroy()
             self._yt_progress_dlg = None
 
     def _on_yt_cancel_download(self, event):
-        """User cancelled the download."""
-        self._yt_cancel_requested = True
-        self._yt_close_progress_dialog()
-        # Clear the queue so no further items download
-        self._yt_download_idx = len(self._yt_download_queue)
-        self._yt_download_subfolder = None  # don't offer channel creation on cancel
-        self.status_label.SetLabel("Download cancelled")
-        speak("Download cancelled")
-        self.logger.log_playback("YOUTUBE", "Download cancelled by user")
+        """User cancelled the download (kept for compatibility)."""
+        self._on_cancel_downloads(event)
 
     def _yt_download_thread(self, title, url, _retry=False):
         try:
             def progress(percent, filename):
-                if getattr(self, "_yt_cancel_requested", False):
+                if getattr(self, "_yt_cancel_requested", False) or getattr(self, "_bg_cancel_requested", False):
                     raise _YTDownloadCancelled()
                 wx.CallAfter(self._yt_update_progress, percent, title)
 
@@ -3036,13 +3167,12 @@ class PlayerFrame(wx.Frame):
                 wx.CallAfter(self._yt_error, f"Download error for {title}: {e}")
 
     def _yt_update_progress(self, percent, title):
-        # Update the progress dialog and status label
+        # Update the status line only; there is no pop-up window any more.
+        # Nothing is spoken here, so progress does not talk over playback.
+        self._bg_yt_percent = percent
         current = self._yt_download_idx + 1
         total = len(self._yt_download_queue)
-        if getattr(self, "_yt_progress_dlg", None):
-            self._yt_progress_gauge.SetValue(int(min(max(percent, 0), 100)))
-            self._yt_progress_status.SetLabel(f"{percent:.0f}%")
-        self.status_label.SetLabel(f"Downloading {current} of {total}: {title} - {percent:.0f}%")
+        self.status_label.SetLabel(f"Downloading in the background {current} of {total}: {title} - {percent:.0f}%")
 
     def _yt_download_complete(self, title, filepath):
         self.status_label.SetLabel(f"Downloaded: {title}")
@@ -3054,6 +3184,7 @@ class PlayerFrame(wx.Frame):
     def _yt_download_skipped(self, title):
         """A video that was already downloaded before — skipped, not an error."""
         self.status_label.SetLabel(f"Already have: {title}")
+        speak(f"Already have {title}, skipping")
         self._yt_download_idx += 1
         self._yt_download_next()
 

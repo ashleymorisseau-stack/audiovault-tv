@@ -175,6 +175,8 @@ class VoiceControl:
                     query = text.split(keyword, 1)[1].strip()
                     return ('search_shows', query) if query else 'search_shows'
             return 'search_shows'
+        if 'download status' in text or 'downloads status' in text or 'what is downloading' in text:
+            return 'download_status'
         if 'download' in text:
             return 'download'
         
