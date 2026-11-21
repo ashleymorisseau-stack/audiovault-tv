@@ -1,5 +1,7 @@
 # Sensitive / credentials
 config.ini
+github_token.txt
+logs/
 
 # Python
 __pycache__/
