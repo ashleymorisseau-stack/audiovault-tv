@@ -7,6 +7,12 @@ REM It also brings down Push-AudioVault-Update.bat, if one was pushed.
 REM
 REM What it does now, just like the push file:
 REM   1. Beeps once when it starts, so you know it is running.
+REM      It also beeps and speaks at every step along the way --
+REM      starting, pulling from GitHub, halfway, almost done, then
+REM      done -- so you always know if it is halfway done, almost
+REM      done, done, or not completed. If a step fails, it plays
+REM      one low beep and says plainly, Honey, that it did not
+REM      finish and why, so you are not left waiting.
 REM   2. Pulls the latest changes from GitHub.
 REM   3. Writes a little text note called pull_result.txt in this
 REM      same folder, saying whether the pull worked. On success it
@@ -34,10 +40,15 @@ cd /d "%~dp0%"
 set "LOG=%TEMP%\audiovault_pull_log.txt"
 set "NOTE=pull_result.txt"
 if exist "%LOG%" del "%LOG%"
-echo Starting the pull now...
+echo Starting the pull now, Honey...
 powershell -NoProfile -Command "[console]::beep(660,200)"
+set "SPEAK_MSG=Starting the pull, Honey."
+call :SPEAK
 echo.
-echo Pulling the latest Audio Vault TV changes...
+echo Pulling the latest Audio Vault TV changes from GitHub...
+powershell -NoProfile -Command "[console]::beep(770,150)"
+set "SPEAK_MSG=Pulling from GitHub now, Honey."
+call :SPEAK
 echo.
 git pull --no-edit > "%LOG%" 2>&1
 set PULL_ERR=%errorlevel%
@@ -49,6 +60,14 @@ if %errorlevel% EQU 0 goto ALREADY_UP_TO_DATE
 goto PULL_OK
 
 :PULL_OK
+echo Halfway done, Honey. The pull finished. Now I am writing your note.
+powershell -NoProfile -Command "[console]::beep(770,150)"
+set "SPEAK_MSG=Halfway done, Honey. The pull finished. Now I am writing your note."
+call :SPEAK
+echo Almost done, Honey.
+powershell -NoProfile -Command "[console]::beep(990,150)"
+set "SPEAK_MSG=Almost done, Honey."
+call :SPEAK
 powershell -NoProfile -Command "[console]::beep(880,250); [console]::beep(1320,400)"
 echo Pull successful, Honey! It's done.
 echo New changes came down from GitHub.
@@ -72,6 +91,14 @@ call :SPEAK
 goto END
 
 :ALREADY_UP_TO_DATE
+echo Halfway done, Honey. The pull finished. Now I am writing your note.
+powershell -NoProfile -Command "[console]::beep(770,150)"
+set "SPEAK_MSG=Halfway done, Honey. The pull finished. Now I am writing your note."
+call :SPEAK
+echo Almost done, Honey.
+powershell -NoProfile -Command "[console]::beep(990,150)"
+set "SPEAK_MSG=Almost done, Honey."
+call :SPEAK
 powershell -NoProfile -Command "[console]::beep(880,250); [console]::beep(1320,400)"
 echo Pull successful, Honey! It's done.
 echo Everything was already up to date. Nothing new came down.
@@ -93,7 +120,7 @@ call :SPEAK
 goto END
 
 :PULL_FAILED
-echo The pull did not finish.
+echo The pull did not finish, Honey.
 echo Here is what GitHub said:
 type "%LOG%"
 echo.

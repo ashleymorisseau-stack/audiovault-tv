@@ -7,6 +7,13 @@ REM It works from the folder it is in, so no Command Prompt typing is needed.
 REM
 REM What it does, step by step:
 REM   1. Beeps once when it starts, so you know it is running.
+REM      It also beeps and speaks at every step along the way --
+REM      starting, pulling first, adding files, halfway, committing,
+REM      pushing, almost done, then done -- so you always know if
+REM      it is halfway done, almost done, done, or not completed.
+REM      If a step fails, it plays one low beep and says plainly,
+REM      Honey, that it did not finish and why, so you are not
+REM      left waiting.
 REM   2. Pulls the latest changes from GitHub FIRST, so GitHub is not ahead
 REM      of this PC and the push is not rejected. This was the problem
 REM      when you heard high, high, low: Muse had just put new
@@ -48,8 +55,10 @@ REM pull_result.txt is never sent to GitHub. It stays only on this PC.
 cd /d "%~dp0%"
 set "LOG=%TEMP%\audiovault_push_log.txt"
 if exist "%LOG%" del "%LOG%"
-echo Sending Audio Vault TV changes to GitHub...
+echo Sending Audio Vault TV changes to GitHub, Honey...
 powershell -NoProfile -Command "[console]::beep(660,200)"
+set "SPEAK_MSG=Starting the push, Honey."
+call :SPEAK
 echo.
 echo Before you push, make sure any new file is inside this folder,
 echo not still in Downloads. A file still in Downloads cannot be pushed.
@@ -61,19 +70,28 @@ echo Listen for your new files in that list. If one is not there,
 echo move it into this folder first, then run this file again.
 echo.
 echo Pulling the latest changes from GitHub first, so the push is not rejected...
+powershell -NoProfile -Command "[console]::beep(770,150)"
+set "SPEAK_MSG=Pulling the latest changes from GitHub first, Honey."
+call :SPEAK
 git pull --no-edit > "%LOG%" 2>&1
 set PULL_ERR=%errorlevel%
 type "%LOG%"
 echo.
 if %PULL_ERR% NEQ 0 goto PULL_FAILED
 echo.
-echo Adding every new and changed file, including every new sound...
+echo Adding every new and changed file, Honey...
+powershell -NoProfile -Command "[console]::beep(770,150)"
+set "SPEAK_MSG=Adding your files now, Honey."
+call :SPEAK
 git add -A
 git add *.py *.bat *.md *.txt 2>nul
 REM pull_result.txt must never go to GitHub, even if it was added
 REM above. Take it back out of the list of files ready to send.
 git reset -q pull_result.txt 2>nul
 powershell -NoProfile -Command "[console]::beep(880,150)"
+echo Halfway done, Honey. Your files are added and ready to send.
+set "SPEAK_MSG=Halfway done, Honey. Your files are added and ready to send."
+call :SPEAK
 echo.
 echo Files ready to send:
 git diff --cached --name-only
@@ -85,7 +103,10 @@ if errorlevel 1 goto HAS_CHANGES
 goto NOTHING_NEW
 
 :HAS_CHANGES
-echo There are changes to send. Committing them now...
+echo There are changes to send. Committing them now, Honey...
+powershell -NoProfile -Command "[console]::beep(770,150)"
+set "SPEAK_MSG=Committing your changes now, Honey."
+call :SPEAK
 git commit -m "Update from PC on %DATE% %TIME% - Audio Vault TV" > "%LOG%" 2>&1
 set COMMIT_ERR=%errorlevel%
 type "%LOG%"
@@ -94,8 +115,10 @@ if %COMMIT_ERR% NEQ 0 goto COMMIT_FAILED
 goto PUSH
 
 :PUSH
-echo Pushing to GitHub now...
+echo Pushing to GitHub now, Honey...
 powershell -NoProfile -Command "[console]::beep(990,150)"
+set "SPEAK_MSG=Pushing to GitHub now, Honey."
+call :SPEAK
 git push > "%LOG%" 2>&1
 set PUSH_ERR=%errorlevel%
 type "%LOG%"
@@ -104,8 +127,10 @@ if %PUSH_ERR% NEQ 0 goto PUSH_RETRY
 goto PUSH_OK
 
 :PUSH_RETRY
-echo The first push did not go through. Pulling again and trying once more...
+echo The first push did not go through, Honey. Pulling again and trying once more...
 powershell -NoProfile -Command "[console]::beep(990,150)"
+set "SPEAK_MSG=The first push did not go through, Honey. Pulling again and trying once more."
+call :SPEAK
 git pull --no-edit > "%LOG%" 2>&1
 set PULL2_ERR=%errorlevel%
 type "%LOG%"
@@ -119,6 +144,10 @@ if %PUSH2_ERR% NEQ 0 goto PUSH_FAILED
 goto PUSH_OK
 
 :PUSH_OK
+echo Almost done, Honey.
+powershell -NoProfile -Command "[console]::beep(990,150)"
+set "SPEAK_MSG=Almost done, Honey."
+call :SPEAK
 powershell -NoProfile -Command "[console]::beep(880,250); [console]::beep(1320,400)"
 echo Push successful, Honey, it's on GitHub.
 echo Your changes are now on GitHub for Muse to read.
@@ -127,7 +156,7 @@ call :SPEAK
 goto END
 
 :PULL_FAILED
-echo The pull did not finish, so the push cannot go through yet.
+echo The pull did not finish, Honey, so the push cannot go through yet.
 echo Here is what GitHub said:
 type "%LOG%"
 echo.
@@ -136,7 +165,7 @@ call :EXPLAIN
 goto END
 
 :COMMIT_FAILED
-echo The commit did not finish. Please try running this file again.
+echo The commit did not finish, Honey. Please try running this file again.
 echo Here is what GitHub said:
 type "%LOG%"
 echo.
@@ -145,7 +174,7 @@ call :EXPLAIN
 goto END
 
 :PUSH_FAILED
-echo The push did not finish, even after pulling and trying again.
+echo The push did not finish, Honey, even after pulling and trying again.
 echo Here is what GitHub said:
 type "%LOG%"
 echo.
