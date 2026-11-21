@@ -148,8 +148,6 @@ class PlayerFrame(wx.Frame):
         select_recursive_item = file_menu.Append(wx.ID_ANY, "Select Folder (with subfolders)\tCtrl+Shift+O", "Select folder and include all subfolders")
         self.Bind(wx.EVT_MENU, self._on_select_folder_recursive, select_recursive_item)
         file_menu.AppendSeparator()
-        upload_log_item = file_menu.Append(wx.ID_ANY, "Upload Log\tCtrl+Shift+U", "Upload log file for troubleshooting")
-        self.Bind(wx.EVT_MENU, self._on_upload_log, upload_log_item)
         check_updates_item = file_menu.Append(wx.ID_ANY, "Check for Updates", "Check for and install program updates")
         self.Bind(wx.EVT_MENU, self._on_check_updates, check_updates_item)
         file_menu.AppendSeparator()
@@ -1848,24 +1846,6 @@ class PlayerFrame(wx.Frame):
         speak(msg)
         wx.MessageBox(msg, "Update Complete", wx.OK | wx.ICON_INFORMATION)
 
-    def _on_upload_log(self, event):
-        """Manually upload log file to S3"""
-        msg = "Uploading log..."
-        self.status_label.SetLabel(msg)
-        speak(msg)
-        
-        try:
-            self.logger.upload_log()
-            msg = "Log uploaded successfully"
-            self.status_label.SetLabel(msg)
-            speak(msg)
-            wx.MessageBox(msg, "Upload Complete", wx.OK | wx.ICON_INFORMATION)
-        except Exception as e:
-            msg = f"Log upload failed: {e}"
-            self.status_label.SetLabel(msg)
-            speak("Log upload failed")
-            wx.MessageBox(msg, "Upload Failed", wx.OK | wx.ICON_ERROR)
-    
     def _vault_auto_login(self):
         """Try auto-login with saved credentials in background"""
         email, password = av.load_credentials()
@@ -3202,7 +3182,7 @@ class PlayerFrame(wx.Frame):
             livetv.stop_stream(self.livetv_process)
             self.livetv_process = None
             # Fold the ffplay diagnostics into the main debug log so buffering
-            # info rides along with the normal "Upload Log" action.
+            # info is kept in the main debug log.
             self._livetv_capture_stream_diagnostics()
 
     def _livetv_capture_stream_diagnostics(self):
