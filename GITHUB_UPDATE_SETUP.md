@@ -63,10 +63,9 @@ able to live in the repo at all — the updater is built to cope with that.
 
 - `main.py` was not changed. It still calls the same two functions,
   `check_for_updates()` and `apply_updates()`, from `auto_updater.py`.
-- `upload_to_s3.py` and `S3_SETUP.md` are still in the repo but are no
-  longer used. They can be deleted when you are sure you do not need the
-  old S3 setup any more.
+- `upload_to_s3.py` and `S3_SETUP.md` have been deleted. There is no S3
+  code left in the program at all.
 - The old `.update_etags.json` file (the S3 change-memory) is no longer
   used. You can delete it; leaving it there is harmless.
-- The log upload in `player_logger.py` still uses S3. That is a separate
-  job and has not been changed.
+- The log upload to S3 is gone too. The log file (`player_log.txt`) is
+  still saved on your computer for troubleshooting.
