@@ -8,6 +8,8 @@ How it decides a file needs updating:
   1. Ask GitHub for the repo's file list (the "tree"). Each file in the
      list has a git blob SHA - a fingerprint of its exact contents.
   2. Work out the same fingerprint for the file on this computer.
+     Text files are compared with Windows line endings ignored,
+     so a file that was just pulled does not look changed.
   3. If the fingerprints differ, or the file is missing here, it needs
      updating.
 
@@ -70,16 +72,22 @@ def _git_blob_sha(data):
 
 
 def _local_blob_sha(path):
-    """Git fingerprint of a local file, or None if it does not exist."""
+    """Git fingerprint of a local file, or None if it does not exist.
+
+    Windows checkouts store text files with CRLF line endings while the
+    repo stores LF, so the raw bytes differ even when the words are the
+    same. Text files are normalised to LF before fingerprinting, so a
+    freshly pulled file matches the repo. Binary files (sounds, tools)
+    are fingerprinted exactly as they are.
+    """
     if not os.path.exists(path):
         return None
-    size = os.path.getsize(path)
-    sha = hashlib.sha1()
-    sha.update(b"blob %d\0" % size)
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            sha.update(chunk)
-    return sha.hexdigest()
+        data = f.read()
+    if b"\0" not in data:
+        # Looks like text: ignore the CRLF/LF difference.
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def _fetch_tree():
