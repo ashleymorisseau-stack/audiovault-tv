@@ -694,16 +694,34 @@ class PlayerFrame(wx.Frame):
         
         channel_data = self.channels.get_current_channel_data()
         if channel_data and channel_data['folders']:
-            # Use cached playlist if available, otherwise scan folders
+            # Use cached playlist if available, otherwise scan folders.
+            # The cache was already repaired on load (stale entries
+            # dropped, index clamped), so a stale cache can no longer
+            # point at a file that is gone.
             cached_playlist = channel_data.get('cached_playlist')
             if cached_playlist:
                 self.playlist.load_from_cache(channel_data['folders'], cached_playlist)
+                if not self.playlist.playlist:
+                    # Every cached file is gone: rescan the folders
+                    # instead of sitting on an empty playlist.
+                    self.playlist.add_folders(channel_data['folders'])
+                    self.channels.update_current_channel(cached_playlist=self.playlist.get_cache_data())
             else:
                 self.playlist.add_folders(channel_data['folders'])
                 # Save cache for next time
                 self.channels.update_current_channel(cached_playlist=self.playlist.get_cache_data())
 
-            self.playlist.set_index(channel_data.get('current_index', 0))
+            # Clamp the saved index: a file that was deleted could
+            # otherwise leave it past the end of the playlist.
+            try:
+                saved_index = int(channel_data.get('current_index', 0))
+            except Exception:
+                saved_index = 0
+            if self.playlist.playlist:
+                saved_index = max(0, min(saved_index, len(self.playlist.playlist) - 1))
+            else:
+                saved_index = 0
+            self.playlist.set_index(saved_index)
             self._load_current_file()
             saved_position = channel_data.get('position', 0)
             self.player.paused_position = saved_position
@@ -1267,56 +1285,59 @@ class PlayerFrame(wx.Frame):
         # Don't speak this, just show in status
     
     def _check_channel_integrity(self):
-        """Check channels for corrupted data on startup (lightweight check)"""
-        if not self.channels.has_channels():
+        """Repair channels on startup instead of calling them corrupted.
+
+        An out-of-range index or a stale cached playlist only means a
+        file was moved or deleted, or the cache is old -- it does not
+        mean the channels file itself is corrupt. So this method repairs
+        that channel only (clamp the index, drop stale cached entries,
+        rebuild the cache from the folders) and keeps every channel.
+        It never deletes the channels file.
+
+        Only a channels file that cannot be read as JSON at all, or is
+        missing its 'channels' section, is treated as corrupt, and even
+        then a backup is tried first and nothing is deleted.
+        """
+        # True file corruption: the load failed and backup recovery in
+        # ChannelManager.load_channels() could not fix it. The file is
+        # left exactly as it is (save is locked) so no data is lost.
+        if not self.channels._load_ok:
+            if self.channels._recover_from_backup():
+                self.logger.log_channel("RECOVERED", "", "channels restored from backup")
+                self.playlist = PlaylistManager()
+                self._load_current_channel()
+                self._update_title()
+                self._update_display()
+                msg = "Honey, your channels could not be read, so I brought them back from a backup."
+                self.status_label.SetLabel(msg)
+                speak(msg)
+                return
+            self.logger.log_error("CORRUPTION DETECTED: channels file unreadable, no valid backup found")
+            msg = ("Honey, your channels file could not be read, and no backup "
+                   "could bring it back. I did not delete anything, so your "
+                   "channels file is still there for us to look at together.")
+            wx.MessageBox(msg, "Channels Could Not Be Read", wx.OK | wx.ICON_WARNING)
+            self.status_label.SetLabel(msg)
+            speak(msg)
             return
 
-        corrupted = []
-        for name, data in self.channels.channels.items():
-            folders = data.get('folders', [])
-            if not folders:
-                continue
-
-            current_index = data.get('current_index', 0)
-            cached_playlist = data.get('cached_playlist')
-
-            if cached_playlist:
-                # Use cache for fast check - no filesystem scan
-                if current_index >= len(cached_playlist):
-                    corrupted.append(name)
-                elif cached_playlist:
-                    # Check if the file belongs to one of the channel's folders
-                    _, file_path = cached_playlist[current_index]
-                    in_channel = any(file_path.startswith(f) for f in folders)
-                    if not in_channel:
-                        corrupted.append(name)
-            # If no cache, skip - it'll get built on next load
-
-        if corrupted:
-            self.logger.log_error(f"CORRUPTION DETECTED in channels: {', '.join(corrupted)}")
-            names = ", ".join(corrupted)
-            user_name = self._get_user_name()
-            greeting = f"{user_name}, your" if user_name else "Your"
-            msg = (f"{greeting} channel data appears corrupted. "
-                   f"Affected channels: {names}. "
-                   f"You may need to start your channel list fresh.")
+        repaired = self.channels.repair_channels()
+        if repaired:
+            names = ", ".join(n for n in repaired if n != "(current channel)")
+            self.logger.log_channel("REPAIRED", "", f"channels repaired on startup: {', '.join(repaired)}")
+            # The repair may have changed the index or cleared a stale
+            # cache, so reload the current channel from the repaired data.
+            self.playlist = PlaylistManager()
+            self._load_current_channel()
+            self._update_title()
+            self._update_display()
+            if names:
+                msg = (f"Honey, I fixed your channel list for {names}. "
+                       f"Nothing was deleted. Your channels are still there.")
+            else:
+                msg = "Honey, I fixed your channel list. Nothing was deleted."
+            self.status_label.SetLabel(msg)
             speak(msg)
-            result = wx.MessageBox(
-                f"{msg}\n\nWould you like to delete the corrupted channel file and start over?",
-                "Data Corruption Detected",
-                wx.YES_NO | wx.ICON_WARNING
-            )
-            if result == wx.YES:
-                channels_file = self.channels.channels_file
-                if channels_file.exists():
-                    channels_file.unlink()
-                    self.channels = ChannelManager(channels_file, logger=self.logger)
-                    self.playlist = PlaylistManager()
-                    self._update_display()
-                    self._update_title()
-                    msg = "Channel file deleted. Please recreate your channels."
-                    self.status_label.SetLabel(msg)
-                    speak(msg)
 
     def _sounds_enabled(self):
         """Check if startup/outro sounds are enabled"""

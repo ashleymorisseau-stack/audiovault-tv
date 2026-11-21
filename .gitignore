@@ -47,3 +47,6 @@ tools/
 
 # Installer
 install.bat
+
+# Local-only pull note (written by Pull-AudioVault-Update.bat, never pushed)
+pull_result.txt

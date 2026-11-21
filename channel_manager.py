@@ -29,7 +29,193 @@ class ChannelManager:
                 self.logger.log_channel("MANAGER", "", message)
             except Exception:
                 pass
-    
+
+    @staticmethod
+    def _normalise_path(path):
+        """Return a Path for comparison, case-insensitive on Windows."""
+        p = Path(str(path))
+        if os.name == "nt":
+            return Path(os.path.normcase(str(p)))
+        return p
+
+    @classmethod
+    def _is_under_folder(cls, file_path, folders):
+        """True if file_path is inside one of folders (not a raw startswith).
+
+        A raw string startswith would wrongly match a sibling folder such as
+        "Show 2" for folder "Show", and would miss the same folder written
+        with different separators or letter case on Windows.
+        """
+        try:
+            file_p = cls._normalise_path(file_path)
+        except Exception:
+            return False
+        for folder in folders:
+            try:
+                folder_p = cls._normalise_path(folder)
+            except Exception:
+                continue
+            try:
+                # Python 3.9+: Path.is_relative_to
+                if file_p.is_relative_to(folder_p):
+                    return True
+            except AttributeError:
+                try:
+                    file_p.relative_to(folder_p)
+                    return True
+                except ValueError:
+                    continue
+            except Exception:
+                continue
+        return False
+
+    def _repair_channels_in_memory(self):
+        """Validate and repair every loaded channel in place.
+
+        A stale cache or an out-of-range index is NOT corruption of the
+        channels file itself, so it is repaired, never used as a reason
+        to wipe anything:
+        - folders must be a list of non-empty strings
+        - cached entries must be [folder_index, path] pairs whose file
+          still exists and is still under one of the channel's folders;
+          stale entries are dropped, and an empty/stale cache is cleared
+          so the next load rebuilds it by scanning the folders
+        - current_index is coerced to int and clamped to a valid range
+        - position is coerced to a non-negative number
+        - bookmarks must be a dict; bookmarks pointing past the end of
+          the cached playlist are dropped
+        - current_channel must name an existing channel
+
+        Returns the list of channel names that were changed.
+        """
+        repaired = []
+        if not isinstance(self.channels, dict):
+            self.channels = {}
+        for name in list(self.channels.keys()):
+            data = self.channels[name]
+            changed = False
+            if not isinstance(data, dict):
+                data = {"folders": [], "current_index": 0, "position": 0,
+                        "bookmarks": {}}
+                self.channels[name] = data
+                changed = True
+
+            folders = data.get("folders")
+            if not isinstance(folders, list):
+                folders = []
+                data["folders"] = folders
+                changed = True
+            else:
+                clean_folders = [f for f in folders
+                                 if isinstance(f, str) and f.strip()]
+                if clean_folders != folders:
+                    data["folders"] = clean_folders
+                    folders = clean_folders
+                    changed = True
+
+            cached = data.get("cached_playlist")
+            if cached is not None:
+                if not isinstance(cached, list):
+                    data.pop("cached_playlist", None)
+                    cached = None
+                    changed = True
+                else:
+                    clean_cache = []
+                    for entry in cached:
+                        try:
+                            _idx, file_path = entry
+                            if not isinstance(file_path, str) or not file_path:
+                                continue
+                            file_p = Path(file_path)
+                        except Exception:
+                            continue
+                        if folders and not self._is_under_folder(file_p, folders):
+                            continue
+                        if not file_p.exists():
+                            continue
+                        clean_cache.append(entry)
+                    if clean_cache != list(cached):
+                        changed = True
+                    if clean_cache:
+                        data["cached_playlist"] = clean_cache
+                        cached = clean_cache
+                    else:
+                        # Nothing playable left in the cache: clear it so
+                        # the next load rebuilds it by scanning the folders.
+                        data.pop("cached_playlist", None)
+                        cached = None
+
+            try:
+                index = int(data.get("current_index", 0))
+            except Exception:
+                index = 0
+                changed = True
+            if cached:
+                index = max(0, min(index, len(cached) - 1))
+            else:
+                index = 0
+            if data.get("current_index") != index:
+                data["current_index"] = index
+                changed = True
+
+            try:
+                position = float(data.get("position", 0) or 0)
+                if position < 0:
+                    position = 0.0
+            except Exception:
+                position = 0.0
+                changed = True
+            if data.get("position") != position:
+                data["position"] = position
+                changed = True
+
+            bookmarks = data.get("bookmarks")
+            if bookmarks is None:
+                data["bookmarks"] = {}
+                changed = True
+            elif not isinstance(bookmarks, dict):
+                data["bookmarks"] = {}
+                changed = True
+            else:
+                for bm_name in list(bookmarks.keys()):
+                    bm = bookmarks[bm_name]
+                    try:
+                        bm_index = int(bm.get("index"))
+                    except Exception:
+                        del bookmarks[bm_name]
+                        changed = True
+                        continue
+                    if cached and not (0 <= bm_index < len(cached)):
+                        del bookmarks[bm_name]
+                        changed = True
+
+            if changed:
+                repaired.append(name)
+
+        if self.current_channel is not None and \
+                self.current_channel not in self.channels:
+            self.current_channel = (next(iter(self.channels.keys()))
+                                    if self.channels else None)
+            repaired.append("(current channel)")
+        return repaired
+
+    def repair_channels(self):
+        """Repair all loaded channels in place and save atomically.
+
+        Returns the list of channel names that were repaired (empty if
+        nothing needed fixing). Never deletes channels or the file.
+        """
+        if not self._load_ok:
+            # The file itself could not be read; do not touch it. The
+            # load already tried a backup restore, and save_channels()
+            # is locked in that state to protect the original file.
+            return []
+        repaired = self._repair_channels_in_memory()
+        if repaired:
+            self._log(f"REPAIRED channels: {', '.join(repaired)}")
+            self.save_channels()
+        return repaired
+
     def _create_backup(self):
         """Create a backup of the current channels file"""
         if not self.channels_file.exists():
@@ -37,6 +223,11 @@ class ChannelManager:
         self.backup_dir.mkdir(exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = self.backup_dir / f"channels_{timestamp}.json"
+        # Two saves in the same second must not overwrite each other's backup.
+        suffix = 1
+        while backup_path.exists():
+            backup_path = self.backup_dir / f"channels_{timestamp}_{suffix}.json"
+            suffix += 1
         shutil.copy2(self.channels_file, backup_path)
         self._cleanup_old_backups()
 
@@ -72,13 +263,15 @@ class ChannelManager:
             # Verify backup is valid JSON
             with open(backup_path, 'r') as f:
                 data = json.load(f)
-            if 'channels' not in data:
+            if not isinstance(data, dict) or not isinstance(data.get('channels'), dict):
                 return False
-            # Load the recovered data, then write it back safely
+            # Load the recovered data, repair any stale entries in it,
+            # then write it back safely
             self.channels = data.get('channels', {})
             self.current_channel = data.get('current_channel')
             self._load_ok = True
             self._had_channels = bool(self.channels)
+            self._repair_channels_in_memory()
             self._write_atomic()
             return True
         except Exception:
@@ -96,10 +289,18 @@ class ChannelManager:
         try:
             with open(self.channels_file, 'r') as f:
                 data = json.load(f)
+            if not isinstance(data, dict) or not isinstance(data.get('channels'), dict):
+                raise ValueError("channels file is missing the 'channels' section")
             self.channels = data.get('channels', {})
             self.current_channel = data.get('current_channel')
             self._load_ok = True
             self._had_channels = bool(self.channels)
+            # A stale cache or out-of-range index is repairable, not a
+            # reason to lose channels: fix it in place and save atomically.
+            repaired = self._repair_channels_in_memory()
+            if repaired:
+                self._log(f"REPAIRED on load: {', '.join(repaired)}")
+                self.save_channels()
         except Exception as e:
             # The file exists but is corrupt/unreadable. DO NOT start empty and
             # let auto-save overwrite it — try to recover from a backup first.
@@ -124,11 +325,13 @@ class ChannelManager:
             try:
                 with open(backup_path, 'r') as f:
                     data = json.load(f)
-                if 'channels' in data and data['channels']:
+                if isinstance(data, dict) and isinstance(data.get('channels'), dict) and data['channels']:
                     self.channels = data['channels']
                     self.current_channel = data.get('current_channel')
                     print(f"Recovered channels from backup: {backup_path.name}")
-                    # Write the recovered data back safely
+                    # Repair any stale entries in the recovered data,
+                    # then write it back safely
+                    self._repair_channels_in_memory()
                     self._write_atomic()
                     return True
             except Exception:
