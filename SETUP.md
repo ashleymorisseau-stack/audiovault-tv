@@ -58,7 +58,7 @@ To get the latest version:
 python update.py
 ```
 
-This will download any updated files from S3. Your channels and bookmarks are saved locally and won't be affected.
+This will download any updated files from GitHub. Your channels and bookmarks are saved locally and won't be affected.
 
 ## Troubleshooting
 
