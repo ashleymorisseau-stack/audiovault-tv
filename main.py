@@ -103,6 +103,7 @@ class PlayerFrame(wx.Frame):
         self.vault_logged_in = False
         self.livetv_process = None  # Live TV stream subprocess
         self._livetv_last_channel = None  # last live channel, for Space resume
+        self._livetv_fallback_in_progress = False  # Live TV fallback is loading in the background
         
         self._create_ui()
         self._bind_hotkeys()
@@ -442,6 +443,12 @@ class PlayerFrame(wx.Frame):
             return
 
         if not self.playlist.get_current():
+            # No local shows at all: fall back to Live TV, which streams
+            # over the internet and does not need the external drive.
+            # This works with the drive plugged in too - it only runs
+            # when there is nothing local to play.
+            if self._livetv_fallback("No shows are available"):
+                return
             msg = "No files loaded. Use Ctrl+O to select folders."
             self.status_label.SetLabel(msg)
             speak(msg)
@@ -477,6 +484,10 @@ class PlayerFrame(wx.Frame):
         # control the MP3 player, not resume a live channel.
         self._livetv_last_channel = None
         if not self.playlist.get_current():
+            # No local show to play: fall back to Live TV instead of
+            # stopping silently. Live TV streams over the internet,
+            # so it plays with or without the external drive.
+            self._livetv_fallback("No shows are available")
             return
         if not self.player.is_playing:
             # Every show says its own name first, so Doctor Who says
@@ -1656,6 +1667,10 @@ class PlayerFrame(wx.Frame):
         channels = self.channels.get_channel_list()
         
         if not channels:
+            # No local channels at all: fall back to Live TV instead
+            # of stopping here. Live TV needs no external drive.
+            if self._livetv_fallback("No channels are available"):
+                return
             msg = "No channels available. Press Ctrl+T to create one."
             wx.MessageBox(msg, "No Channels", wx.OK | wx.ICON_INFORMATION)
             speak(msg)
@@ -1714,6 +1729,13 @@ class PlayerFrame(wx.Frame):
             self.player.is_playing = False
             self.is_switching_channels = False
             self.logger.log_error("All channels empty or drive disconnected")
+            # Every local channel is empty - or the external drive is
+            # not connected - so play Live TV instead. Live TV streams
+            # over the internet, so it plays even without the drive,
+            # and with the drive too, whenever no local show is available.
+            if self._livetv_fallback("No channels with files found"):
+                self.status_label.SetLabel("No channels with files found. Playing live TV instead.")
+                return
             msg = "No channels with files found. Check if your external drive is connected."
             self.status_label.SetLabel(msg)
             speak(msg)
@@ -3044,6 +3066,76 @@ class PlayerFrame(wx.Frame):
         # completion logic (which offers to create a channel).
         self._yt_download_idx += 1
         wx.CallLater(1000, self._yt_download_next)
+
+    # ---- Live TV fallback: play Live TV when no local show is available ----
+    def _livetv_pick_fallback_channel(self, channels):
+        """Pick one live channel to play automatically, with no dialog.
+        Favorites first, then a familiar category, then the first channel.
+        """
+        if not channels:
+            return None
+        try:
+            fav_channels = livetv.get_favorite_channels()
+            fav_ids = {c.get("id") for c in fav_channels}
+        except Exception:
+            fav_ids = set()
+        for c in channels:
+            if c.get("id") in fav_ids:
+                return c
+        for wanted in ("general", "entertainment", "news", "movies", "series",
+                       "documentary", "music", "kids", "sports"):
+            for c in channels:
+                if wanted in (c.get("categories") or []):
+                    return c
+        return channels[0]
+
+    def _livetv_fallback(self, reason="No shows are available"):
+        """Start Live TV when no local show is available.
+        Works with the external drive plugged in or not: Live TV streams
+        over the internet, so it needs no local files and no drive.
+        Returns True if a live stream is already playing or a fallback
+        attempt has started, False if Live TV is not available at all.
+        """
+        if not LIVETV_AVAILABLE:
+            msg = "Live TV is not available. No shows are available to play."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            self.logger.log_error(f"LIVETV-FALLBACK: {reason} but Live TV not available")
+            return False
+        if getattr(self, "livetv_process", None):
+            return True
+        if getattr(self, "_livetv_fallback_in_progress", False):
+            return True
+        self._livetv_fallback_in_progress = True
+        msg = "No shows are available. Playing live TV instead. Live TV does not need your external drive."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self.logger.log_playback("LIVETV-FALLBACK", reason)
+        threading.Thread(target=self._livetv_fallback_thread, daemon=True).start()
+        return True
+
+    def _livetv_fallback_thread(self):
+        try:
+            livetv.refresh_catalog()
+            channels = livetv.get_all_channels()
+            channel = self._livetv_pick_fallback_channel(channels)
+            wx.CallAfter(self._livetv_fallback_done, channel, None)
+        except Exception as e:
+            wx.CallAfter(self._livetv_fallback_done, None, str(e))
+
+    def _livetv_fallback_done(self, channel, error):
+        self._livetv_fallback_in_progress = False
+        self._advance_attempts = 0
+        self.is_switching_channels = False
+        if not channel:
+            msg = "Live TV is not available right now. No shows are available to play."
+            if error:
+                self.logger.log_error(f"LIVETV-FALLBACK failed: {error}")
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        # _livetv_play speaks "Tuning in to ..." and starts the stream.
+        self._livetv_play(channel)
 
     # ---- Live TV (iptv-org) ----
 
