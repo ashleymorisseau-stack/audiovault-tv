@@ -479,15 +479,21 @@ class PlayerFrame(wx.Frame):
         if not self.playlist.get_current():
             return
         if not self.player.is_playing:
+            # Every show says its own name first, so Doctor Who says
+            # "Doctor Who", Odd Squad says "Odd Squad", The Big Bang Theory
+            # says "The Big Bang Theory", and no show ever says another
+            # show's name.
+            channel_name = self.channels.current_channel or ""
+            channel_prefix = f"{channel_name}. " if channel_name else ""
             if not self.player.current_file:
                 if self._load_current_file():
                     self.player.play()
-                    msg = f"Playing: {self.playlist.get_current_file_name()}"
+                    msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
                     self.status_label.SetLabel(msg)
                     speak(msg)
             else:
                 self.player.unpause()
-                msg = f"Playing: {self.playlist.get_current_file_name()}"
+                msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
                 self.status_label.SetLabel(msg)
                 speak(msg)
 
@@ -932,6 +938,13 @@ class PlayerFrame(wx.Frame):
                         
                         self._load_current_file()
                         self.player.play()
+                        # Say this show's own name when the next file in
+                        # the same channel starts, too.
+                        channel_name = self.channels.current_channel or ""
+                        channel_prefix = f"{channel_name}. " if channel_name else ""
+                        msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
+                        self.status_label.SetLabel(msg)
+                        speak(msg)
                         self._save_current_channel_state()
                     else:
                         # No more files in current channel
@@ -1738,9 +1751,9 @@ class PlayerFrame(wx.Frame):
         if self.playlist.get_current():
             self.logger.log_playback("AUTO-PLAY", "Starting playback after channel switch")
             self._advance_attempts = 0
+            # _start_playback already says this channel's own name, so
+            # do not say it a second time here.
             self._start_playback()
-            msg = f"Now playing: {self.channels.current_channel}"
-            speak(msg)
             self.is_switching_channels = False
         else:
             self.logger.log_error("No files in channel after auto-advance")
