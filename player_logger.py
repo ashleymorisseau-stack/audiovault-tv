@@ -1,10 +1,8 @@
 import logging
 import os
-import requests
 from pathlib import Path
 from datetime import datetime
 
-S3_LOG_URL = "https://mp3-player-updates.s3.amazonaws.com/logs/"
 
 class PlayerLogger:
     def __init__(self, log_file="player_log.txt"):
@@ -61,17 +59,3 @@ class PlayerLogger:
     def log_playlist_info(self, total_files, current_index, current_file):
         """Log playlist state"""
         self.logger.info(f"PLAYLIST STATE: Index {current_index}/{total_files-1} - {current_file}")
-    
-    def upload_log(self):
-        """Upload log file to S3. Raises exception on failure."""
-        if not self.log_file.exists():
-            raise FileNotFoundError(f"Log file not found: {self.log_file}")
-        
-        s3_key = f"{self.username}_log.txt"
-        url = S3_LOG_URL + s3_key
-        
-        with open(self.log_file, 'rb') as f:
-            r = requests.put(url, data=f)
-        
-        if r.status_code not in (200, 201):
-            raise Exception(f"S3 returned status {r.status_code}: {r.text[:200]}")
