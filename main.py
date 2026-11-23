@@ -2118,14 +2118,78 @@ class PlayerFrame(wx.Frame):
         except Exception as e:
             wx.CallAfter(self._vault_error, f"Search error: {e}")
 
+    def _pick_best_voice_result(self, results, query):
+        """Pick the exact show/movie Honey named, not the first
+        alphabetical result. Honey asked 2026-11-23 that this work
+        for every show she mentions, not just Friends.
+
+        AudioVault search returns every title containing the words,
+        in alphabetical order, so "friends" came back with
+        "A Killer Among Friends" first and the real Friends seasons
+        further down. This scores each result instead:
+        exact title first, then a title starting with the name,
+        then season 1 when no season was named, then a New
+        Description version, then US over UK. Falls back to the
+        first result when nothing matches at all.
+        """
+        import re
+        if not results:
+            return None
+        q = (query or "").lower().strip()
+        q = re.sub(r"\s+(?:us\s+)?new\s+description\s*$", "", q)
+        q = re.sub(r"\s+(?:the\s+)?(?:sitcom|tv\s+show|tv\s+series)\s*$", "", q)
+        q = re.sub(r"\s+(?:us\s+)?new\s+description\s*$", "", q)
+        q = q.strip(" .,")
+        if not q:
+            return results[0]
+        season_wanted = None
+        m = re.search(r"season\s*0*(\d+)", q)
+        if m:
+            season_wanted = int(m.group(1))
+            q = re.sub(r"\s*season\s*0*\d+\s*", " ", q).strip()
+        best = None
+        best_score = -1
+        for result in results:
+            name = (result[1] or "").lower()
+            score = 0
+            base = re.split(r"\s+-\s+season|\s+-\s+|\s*\(", name, 1)[0].strip()
+            if base == q:
+                score += 100
+            elif name.startswith(q + " -"):
+                score += 80
+            elif name.startswith(q + " "):
+                score += 40
+            elif q in name:
+                score += 10
+            else:
+                continue
+            sm = re.search(r"season\s*0*(\d+)", name)
+            if sm:
+                season = int(sm.group(1))
+                if season_wanted is not None:
+                    score += 50 if season == season_wanted else -20
+                elif season == 1:
+                    score += 30
+                else:
+                    score -= season
+            if "new description" in name:
+                score += 20
+            if "[us" in name:
+                score += 5
+            if score > best_score:
+                best_score = score
+                best = result
+        return best if best is not None else results[0]
+
     def _vault_voice_download_results(self, results, kind, query):
-        """Queue the top AudioVault result for a voice download"""
+        """Queue the best AudioVault result for a voice download"""
         if not results:
             msg = f"I could not find {query} on AudioVault."
             self.status_label.SetLabel(msg)
             speak(msg)
             return
-        self._queue_voice_download(results[0], kind)
+        self._queue_voice_download(
+            self._pick_best_voice_result(results, query), kind)
 
     def _vault_voice_download_first(self):
         """Download the first result from the last voice/menu search.
@@ -2144,7 +2208,9 @@ class PlayerFrame(wx.Frame):
             speak(msg)
             return
         kind = getattr(self, "_last_search_kind", "shows")
-        self._queue_voice_download(results[0], kind)
+        query = getattr(self, "_last_search_query", "") or ""
+        best = self._pick_best_voice_result(results, query) if query else results[0]
+        self._queue_voice_download(best, kind)
 
     # ---- YouTube voice search and download ----
     # Mirrors the AudioVault voice flow above: search by voice, hear
@@ -2275,6 +2341,7 @@ class PlayerFrame(wx.Frame):
 
     def _vault_search_thread(self, query, kind):
         """Background thread for search"""
+        self._last_search_query = query
         try:
             results = av.search(query, kind=kind)
             wx.CallAfter(self._vault_show_results, results, kind)
@@ -2295,6 +2362,7 @@ class PlayerFrame(wx.Frame):
     
     def _vault_recents_thread(self, kind):
         """Background thread for recents"""
+        self._last_search_query = ""
         try:
             results = av.get_recents(kind)
             wx.CallAfter(self._vault_show_results, results, kind)
@@ -2368,6 +2436,16 @@ class PlayerFrame(wx.Frame):
             self.status_label.SetLabel(msg)
             speak(msg)
             return
+
+        # Put the exact show Honey named first, for every show, so
+        # the first names she hears are the right show, not the
+        # first alphabetical title containing the words.
+        query = getattr(self, "_last_search_query", "") or ""
+        if query:
+            best = self._pick_best_voice_result(results, query)
+            if best is not None and best is not results[0]:
+                results = [best] + [r for r in results if r is not best]
+                self._last_search_results = list(results)
 
         items = [f"{name} ({av_id})" for av_id, name, link in results]
         # Speak the first few names, so Honey can hear them without
