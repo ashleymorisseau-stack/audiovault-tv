@@ -19,6 +19,24 @@ def _clean_query(query):
     # Drop a trailing "on youtube / from youtube".
     query = re.sub(r"\s+(?:on|from)\s+(?:you\s*?tube|youtube)\s*$", "", query)
     query = re.sub(r"\s+please\s*$", "", query)
+    # Honey, 2026-11-23: "search for Friends the sitcom new
+    # description" returned nothing on AudioVault, because the site
+    # search matches the show title, not those extra words.
+    # "friends new description" -> 0 results, "friends the sitcom"
+    # -> 0 results, but "friends" -> 54 results, including the exact
+    # "Friends - Season 01 (1994) [US New Description]". So drop
+    # those descriptive words here; main.py then picks the exact
+    # show, preferring a New Description version, instead of
+    # taking the first alphabetical result ("A Killer Among
+    # Friends").
+    # Drop "new description" first, then "the sitcom", then
+    # "new description" again, so "friends the sitcom new
+    # description" cleans all the way down to "friends".
+    query = re.sub(r"\s+(?:us\s+)?new\s+description\s*$", "", query)
+    query = re.sub(
+        r"\s+(?:the\s+)?(?:sitcom|tv\s+show|tv\s+series|television\s+show)\s*$",
+        "", query)
+    query = re.sub(r"\s+(?:us\s+)?new\s+description\s*$", "", query)
     query = query.strip(" .,")
     # Drop a leading "for / a / an / the" left over from a split.
     query = re.sub(r"^(?:for|a|an|the)\s+", "", query)
