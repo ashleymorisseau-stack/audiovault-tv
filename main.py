@@ -1205,9 +1205,11 @@ class PlayerFrame(wx.Frame):
             speak(msg)
         else:
             # Start listening in a separate thread
+            # Honey, 2026-11-23 evening: Samantha says "I'm listening"
+            # when she starts listening, so Honey knows she is ready.
             self.is_voice_listening = True
             self._play_sound_effect("start_of_request.wav")
-            msg = "Listening for command..."
+            msg = "I'm listening"
             self.status_label.SetLabel(msg)
             speak(msg)
             
@@ -1409,14 +1411,21 @@ class PlayerFrame(wx.Frame):
             self._on_vault_recents(None, kind="movies")
             msg = f"Command recognized: {text}"
         else:
-            msg = f"Unknown command: {text}"
+            # Honey, 2026-11-23 evening: if Samantha heard words
+            # but did not understand them, she says "Excuse me"
+            # and asks Honey to say it again.
+            msg = (f"Excuse me, I didn't understand {text}. "
+                   "Could you say that again?")
         
         self.status_label.SetLabel(msg)
         speak(msg)
     
     def _voice_no_command(self):
         """Handle no command recognized"""
-        msg = "No command recognized"
+        # Honey, 2026-11-23 evening: if Samantha cannot hear
+        # anything, she says "Excuse me" and asks Honey to
+        # say it again, instead of just "No command recognized".
+        msg = "Excuse me, I didn't hear you. Could you say that again?"
         self.status_label.SetLabel(msg)
         speak(msg)
     
@@ -1450,7 +1459,9 @@ class PlayerFrame(wx.Frame):
             # when Samantha is actually heard, so she knows Samantha is listening.
             self.wake_word_mode = True
             self._play_sound_effect("start_of_request.wav")
-            msg = "Wake word mode active. Say 'Samantha' followed by a command."
+            # Honey, 2026-11-23 evening: Samantha says "I'm listening"
+            # when wake-word mode starts, too.
+            msg = "I'm listening. Say 'Samantha' followed by a command."
             self.status_label.SetLabel(msg)
             speak(msg)
 
@@ -1484,7 +1495,7 @@ class PlayerFrame(wx.Frame):
         # Samantha greets Honey by name, when she has told Samantha
         # her name by voice (see _parse_name_command / _set_user_name).
         name = self._get_user_name()
-        msg = f"Hi {name}, I'm listening" if name else "Listening..."
+        msg = f"Hi {name}, I'm listening" if name else "I'm listening"
         self.status_label.SetLabel(msg)
         speak(msg)
     
@@ -1497,9 +1508,12 @@ class PlayerFrame(wx.Frame):
     def _wake_word_no_command(self):
         """Handle no command after wake word"""
         self._play_sound_effect("end_of_request.wav")
-        msg = "No command heard"
+        # Honey, 2026-11-23 evening: if Samantha cannot hear
+        # anything after the wake word, she says "Excuse me"
+        # out loud and asks Honey to say it again.
+        msg = "Excuse me, I didn't hear you. Could you say that again?"
         self.status_label.SetLabel(msg)
-        # Don't speak this, just show in status
+        speak(msg)
     
     def _check_channel_integrity(self):
         """Repair channels on startup instead of calling them corrupted.

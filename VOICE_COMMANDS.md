@@ -7,7 +7,9 @@
 2. Speak your command clearly within 20 seconds. It keeps listening through a short pause, so you do not have to rush.
 3. You do not have to say "Samantha" in this mode. Just say the command, for example "search for Young Sheldon".
 4. A voice search also downloads the show. Say "search for Young Sheldon" and that is it — it searches AudioVault for the exact show and downloads it in the background, so you do not have to say "download it" afterwards. Saying "download Young Sheldon" does the same thing.
-5. Press **Ctrl+Shift+B** again to stop listening early
+5. Samantha says "I'm listening" when she starts listening.
+6. If she cannot hear you, or does not understand what you said, she says "Excuse me, I didn't hear you. Could you say that again?"
+7. Press **Ctrl+Shift+B** again to stop listening early
 
 ### Mode 2: Wake Word Mode (Ctrl+Shift+W) - Recommended
 1. Press **Ctrl+Shift+W** to activate continuous listening
@@ -33,7 +35,7 @@ Samantha learns your name only when you tell it to her by voice, and she remembe
 | "what is your name" | Samantha says "My name is Samantha" |
 | "hello" / "hi" | Samantha greets you by name, if she knows it |
 
-When she knows your name, Samantha greets you with it when she hears her wake word — "Hi Honey, I'm listening" — instead of just "Listening...". You can also set or change your name from the menu, without voice.
+When she knows your name, Samantha greets you with it when she hears her wake word — "Hi Honey, I'm listening" — instead of just "I'm listening". You can also set or change your name from the menu, without voice.
 
 ## Samantha's Own Voice
 
