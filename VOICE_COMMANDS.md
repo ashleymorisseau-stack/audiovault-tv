@@ -17,6 +17,54 @@
 
 **Wake Word Mode is hands-free** - no need to press any keys once activated!
 
+## Your Name — Samantha Remembers It
+
+Samantha learns your name only when you tell it to her by voice, and she remembers it after you close and reopen Audio Vault TV. She never guesses a name you have not told her. Your name is saved on your own PC only, in config.ini, and is never pushed to GitHub.
+
+| Say This | Action |
+|----------|--------|
+| "my name is Honey" | Samantha remembers your name is Honey |
+| "call me Honey" | Samantha remembers to call you Honey |
+| "remember my name is Honey" | Samantha remembers your name is Honey |
+| "what is my name" | Samantha tells you the name she remembers for you |
+| "do you know my name" | Samantha tells you the name she remembers for you |
+| "forget my name" | Samantha forgets your name |
+| "what is your name" | Samantha says "My name is Samantha" |
+| "hello" / "hi" | Samantha greets you by name, if she knows it |
+
+When she knows your name, Samantha greets you with it when she hears her wake word — "Hi Honey, I'm listening" — instead of just "Listening...". You can also set or change your name from the menu, without voice.
+
+## Samantha's Own Voice
+
+Samantha now speaks in her own recorded voice, not just NVDA. Her voice is friendly, excited but not yelling, and a little louder than the first recording.
+
+- When Samantha hears her wake word, she asks in her own voice: "What do you want to watch?"
+- When you ask "what is your name", she answers in her own voice: "Hi, my name is Samantha. What is your name?"
+- Her voice files are in the sounds folder: samantha_greeting.wav (3.4 seconds) and samantha_what_to_watch.wav (1.6 seconds).
+
+## Live TV by Voice
+
+Samantha can play live channels, like Game Show Network and other channels. Live TV streams over the internet, so it does not need your external drive.
+
+| Say This | Action |
+|----------|--------|
+| "play Game Show Network live" | Play the Game Show Network live channel |
+| "play live channel Game Show Network" | Play the Game Show Network live channel |
+| "play live TV" | Play a favourite live channel first, otherwise the first live channel |
+| "search live channels for Game Show Network" | Search live channels and show the list to pick from |
+| "stop live TV" | Stop the live stream |
+
+## Delete a Channel's Downloads
+
+If a channel's downloads are wrong or you do not like them — for example "A Killer Among Friends", the wrong Friends download — Samantha can get rid of them. She asks Yes or No first, so nothing is deleted by accident. Only that channel's own downloaded files are deleted, never a whole shared folder, and the channel is removed so it stops coming up.
+
+| Say This | Action |
+|----------|--------|
+| "delete A Killer Among Friends downloads" | Ask first, then delete its downloaded files and remove the channel |
+| "delete Friends downloads" | Ask first, then delete that channel's downloaded files and remove the channel |
+
+You can also do this from the menu: Channels, then "Delete Channel and Downloads" (Ctrl+Shift+D) for the current channel.
+
 ## Available Voice Commands
 
 ### Playback Control
