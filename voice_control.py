@@ -361,6 +361,41 @@ class VoiceControl:
             return None
         if re.search(r"\bstop\s+(?:the\s+)?live\s+(?:tv|television|channel)\b", text):
             return 'stop_live_tv'
+        # Honey, 2026-11-23: voice search should do live shows too,
+        # as well as AudioVault search and download. So "search live
+        # for Game Show Network", "search for Game Show Network
+        # live", "search for live shows" and "search for Game Show
+        # Network" all go to the live-channel search, not to an
+        # AudioVault show search for a show called that.
+        if re.search(r"\b(?:search|find|look for|look up)\b", text):
+            if "live" in text or "game show network" in text:
+                m = re.search(
+                    r"(?:search|find|look for|look up)\s+(?:for\s+)?(.+)", text)
+                q = ""
+                if m:
+                    q = _clean_query(m.group(1))
+                    # Strip leading filler words, in any order:
+                    # "live for", "for live", "live channels for",
+                    # "live tv shows for", and so on.
+                    while True:
+                        q2 = re.sub(
+                            r"^(?:live|for|tv|television|shows?|channels?|channel)\s+",
+                            "", q)
+                        if q2 == q:
+                            break
+                        q = q2
+                    q = re.sub(
+                        r"\s+(?:live|channel|channels|tv|television|shows?|show)\s*$",
+                        "", q)
+                    q = q.strip()
+                    # "search for live shows" / "find live tv" name
+                    # no channel at all, so search all live channels.
+                    if q in ("live", "tv", "television", "shows", "show",
+                             "channels", "channel", "for"):
+                        q = ""
+                if q:
+                    return ('search_live_channels', q)
+                return 'search_live_channels'
         # "search live channels for Game Show Network"
         m = re.search(r"(?:search|find)\s+(?:live\s+)?(?:tv\s+)?channels?\s+(?:for\s+)?(.+)", text)
         if m and 'live' in text:

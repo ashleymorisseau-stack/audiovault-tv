@@ -52,7 +52,12 @@ Samantha can play live channels, like Game Show Network and other channels. Live
 | "play live channel Game Show Network" | Play the Game Show Network live channel |
 | "play live TV" | Play a favourite live channel first, otherwise the first live channel |
 | "search live channels for Game Show Network" | Search live channels and show the list to pick from |
+| "search live for Game Show Network" | Search live channels for Game Show Network |
+| "search for Game Show Network live" | Search live channels for Game Show Network |
+| "search for live shows" | Show the live channels to pick from |
 | "stop live TV" | Stop the live stream |
+
+A plain show search does live shows too, as well as AudioVault search and download: "search for Close Enough" searches AudioVault, and if a live channel has the same name Samantha speaks it first, so you can say "play Game Show Network live" to watch it live.
 
 ## Delete a Channel's Downloads
 

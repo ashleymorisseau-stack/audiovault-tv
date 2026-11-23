@@ -2411,11 +2411,30 @@ class PlayerFrame(wx.Frame):
         self._vault_download_next()
 
     def _vault_search_thread(self, query, kind):
-        """Background thread for search"""
+        """Background thread for search.
+
+        Honey, 2026-11-23: a voice search should do live shows
+        too, as well as AudioVault search and download. So this
+        also looks for live channels with the same name, and
+        _vault_show_results speaks them first. A live lookup
+        failure never blocks the AudioVault results.
+        """
         self._last_search_query = query
+        live_results = []
+        try:
+            if LIVETV_AVAILABLE and livetv is not None:
+                try:
+                    livetv.refresh_catalog()
+                    live_results = livetv.search_channels(query) or []
+                except Exception:
+                    live_results = []
+        except Exception:
+            live_results = []
+        self._last_live_search_results = list(live_results)
         try:
             results = av.search(query, kind=kind)
-            wx.CallAfter(self._vault_show_results, results, kind)
+            wx.CallAfter(self._vault_show_results, results, kind,
+                         live_results)
         except Exception as e:
             wx.CallAfter(self._vault_error, f"Search error: {e}")
     
@@ -2496,7 +2515,7 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
 
-    def _vault_show_results(self, results, kind):
+    def _vault_show_results(self, results, kind, live_results=None):
         """Show search/recent results and allow multiple downloads"""
         # Remember these for a voice "download it" afterwards.
         self._last_search_results = list(results) if results else []
@@ -2525,6 +2544,17 @@ class PlayerFrame(wx.Frame):
         spoken_names = "; ".join(
             f"{i + 1}. {name}" for i, (_, name, _) in enumerate(results[:3]))
         msg = f"Found {len(items)} results. {spoken_names}."
+        # Live shows found by the same voice search, spoken first
+        # so Honey hears them too. Say "play <name> live" to
+        # watch one live; "download it" still downloads the first
+        # AudioVault result, not a live channel.
+        live_results = live_results or getattr(
+            self, "_last_live_search_results", None) or []
+        if live_results:
+            live_names = "; ".join(
+                c["name"] for c in live_results[:3])
+            msg = (f"Found live too: {live_names}. "
+                   f"Say play one of those live to watch it live. " + msg)
         speak(msg)
         
         # Custom dialog with CheckListBox for NVDA accessibility
