@@ -5,8 +5,9 @@
 ### Mode 1: One-Time Command (Ctrl+Shift+B)
 1. Press **Ctrl+Shift+B** to start listening
 2. Speak your command clearly within 20 seconds. It keeps listening through a short pause, so you do not have to rush.
-3. The app will recognize and execute the command
-4. Press **Ctrl+Shift+B** again to stop listening early
+3. You do not have to say "Samantha" in this mode. Just say the command, for example "search for Young Sheldon".
+4. A voice search also downloads the show. Say "search for Young Sheldon" and that is it — it searches AudioVault for the exact show and downloads it in the background, so you do not have to say "download it" afterwards. Saying "download Young Sheldon" does the same thing.
+5. Press **Ctrl+Shift+B** again to stop listening early
 
 ### Mode 2: Wake Word Mode (Ctrl+Shift+W) - Recommended
 1. Press **Ctrl+Shift+W** to activate continuous listening

@@ -1345,14 +1345,21 @@ class PlayerFrame(wx.Frame):
             self._fastforward()
             msg = f"Command recognized: {text}"
         elif command == 'search_movies':
+            # Honey, 2026-11-23 evening: "search for Young Sheldon
+            # and that is it" - a voice search downloads the show
+            # right after it searches, so she does not have to say
+            # "download it" again. No name needed in one-time mode.
             if query:
-                self._vault_voice_search(query, "movies")
+                self._vault_voice_download(query, "movies")
             else:
                 self._on_vault_search(None, kind="movies")
             msg = f"Command recognized: {text}"
         elif command == 'search_shows':
+            # Honey, 2026-11-23 evening: same as movies above.
+            # "search for Young Sheldon" searches AudioVault for
+            # the exact show and downloads it in the background.
             if query:
-                self._vault_voice_search(query, "shows")
+                self._vault_voice_download(query, "shows")
             else:
                 self._on_vault_search(None, kind="shows")
             msg = f"Command recognized: {text}"

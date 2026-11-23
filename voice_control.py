@@ -272,6 +272,16 @@ class VoiceControl:
 
         text = text.lower().strip()
 
+        # Honey, 2026-11-23 evening: she does not have to say
+        # Samantha's name all the time. In one-time mode
+        # (Ctrl+Shift+B, the push button) she just says the
+        # command, for example "search for Young Sheldon".
+        # Strip a leading "Samantha" / "Hey Samantha" here, so
+        # it is optional and never becomes part of the show name.
+        # The wake-word path already strips it; this covers the
+        # push-button path too.
+        text = re.sub(r"^(?:hey\s+)?samantha[,\s]+", "", text.strip())
+
         # --- Name: Honey asked 2026-11-23 that Samantha learn her
         # name when she tells it to her, and remember it. Checked
         # before search/download/play, so "my name is Honey" is not
