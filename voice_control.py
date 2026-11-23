@@ -226,6 +226,20 @@ class VoiceControl:
         if name_command is not None:
             return name_command
 
+        # --- Fix mixed-up shows: Honey asked 2026-11-23 that
+        # shows she already has are still mixed up with other
+        # shows. Checked before search/download, so "fix the
+        # mixed up shows" is not swallowed by a show search.
+        if re.search(
+                r"\b(?:fix|unmix|un-mix|sort out|straighten out)\b.*"
+                r"\b(?:mixed|mix|mixed up|mix up|mixed-up)\b",
+                text):
+            return 'fix_mixed_channels'
+        if re.search(r"\bshows? (?:are|is) mixed up\b", text):
+            return 'fix_mixed_channels'
+        if re.search(r"\bunmix\b", text):
+            return 'fix_mixed_channels'
+
         # --- Live TV: Honey asked 2026-11-23 that Samantha also
         # play live channels, like Game Show Network and other
         # channels. Checked before YouTube/AudioVault search and
@@ -433,15 +447,26 @@ class VoiceControl:
         """Return ('delete_channel_downloads', name),
         'delete_channel_downloads' (current channel), or None.
 
-        "delete A Killer Among Friends downloads" -> the named
-        channel. Vosk may hear "amongst" for "among", so normalise
-        it here; main.py matches "killer among friends" either way.
+        Honey, 2026-11-23: "whenever I tell it to delete the
+        show, it deletes it." So this must catch every way she
+        says it, not only "delete ... downloads":
+        "delete Friends", "delete the show", "delete this show",
+        "delete A Killer Among Friends", "get rid of this show".
+        "delete the show" / "delete this show" / "delete it"
+        means the channel playing right now, so main.py deletes
+        the current channel. Vosk may hear "amongst" for "among",
+        so normalise it here; main.py matches "killer among
+        friends" either way.
         """
         if not re.search(r"\b(?:delete|remove|get rid of)\b", text):
             return None
-        if 'download' not in text and 'channel' not in text:
-            return None
         text = text.replace('amongst', 'among')
+        # "delete the show" / "delete this show" / "delete this
+        # channel" / "delete it" - the current show.
+        if re.search(
+                r"(?:delete|remove|get rid of)\s+(?:the\s+|this\s+)?"
+                r"(?:show|channel|episode|movie|it|that|them)\s*$", text):
+            return 'delete_channel_downloads'
         m = re.search(
             r"(?:delete|remove|get rid of)\s+(?:the\s+)?(.+?)\s+downloads?\b", text)
         if m:
@@ -456,6 +481,19 @@ class VoiceControl:
             q = _clean_query(m.group(1))
             if q:
                 return ('delete_channel_downloads', q)
+        # "delete Friends" / "delete A Killer Among Friends" /
+        # "delete the show Friends" - a named show, no "downloads"
+        # word needed.
+        m = re.search(
+            r"(?:delete|remove|get rid of)\s+(?:the\s+)?"
+            r"(?:show\s+|channel\s+)?(.+)", text)
+        if m:
+            q = _clean_query(m.group(1))
+            q = re.sub(r"\s+(?:show|channel|downloads?)\s*$", "", q)
+            if q and q not in ('them', 'it', 'those', 'these', 'show',
+                               'channel', 'episode', 'movie'):
+                return ('delete_channel_downloads', q)
+            return 'delete_channel_downloads'
         if re.search(r"\bdelete\s+(?:the\s+)?channel\b", text):
             return 'delete_channel_downloads'
         return None

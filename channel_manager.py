@@ -199,6 +199,126 @@ class ChannelManager:
             repaired.append("(current channel)")
         return repaired
 
+    @staticmethod
+    def _words(text):
+        """Lowercase words in a name, without a leading a/the."""
+        import re
+        words = re.findall(r"[a-z0-9]+", str(text or "").lower())
+        if words and words[0] in ("a", "the"):
+            words = words[1:]
+        return words
+
+    @classmethod
+    def _name_matches_file(cls, channel_name, file_path):
+        """True if a file belongs to a channel named channel_name.
+
+        The file's own title must be that show: "Friends - Season
+        01.mp3" belongs to Friends, "Doctor Who - S01E01.mp3"
+        belongs to Doctor Who. The folder it sits in does NOT
+        decide it on its own - an Odd Squad file sitting in the
+        Doctor Who folder is exactly the mix-up, and "A Killer
+        Among Friends" is not Friends just because the word
+        "Friends" is in it. Only a file with a generic name,
+        like "S01E01.mp3" with no show in the name at all, is
+        judged by its folder.
+        """
+        import re
+        words = cls._words(channel_name)
+        if not words:
+            return True
+        wanted = " ".join(words)
+        try:
+            fp = Path(str(file_path))
+            base = re.split(r"\s+-\s+|\s*\(", fp.name, 1)[0].strip().lower()
+            base = re.sub(r"^(?:a|the)\s+", "", base)
+        except Exception:
+            return False
+        if base == wanted or base.startswith(wanted + " "):
+            return True
+        # Generic file name with no show in it: the folder decides.
+        generic = re.sub(r"[^a-z]", "", base)
+        if base and (re.fullmatch(r"(?:s\d+e\d+|season\s*\d+|episode\s*\d+|part\s*\d+|\d+)", base)
+                     or generic in ("", "s", "e")):
+            try:
+                return fp.parent.name.lower().strip() == wanted
+            except Exception:
+                return False
+        return False
+
+    def unmix_channels(self):
+        """Move files out of channels they do not belong to.
+
+        Honey, 2026-11-23: some shows she already has are still
+        mixed up with other shows - Odd Squad playing on the
+        Doctor Who channel, and the wrong Friends download. This
+        scans every channel's cached playlist: a file whose name
+        does not match its channel is taken out of that channel.
+        If another channel's name does match it, the file is
+        moved to that channel instead (and that channel gains
+        the file's folder, so the move survives a reload). If no
+        channel matches it, it is just taken out of the wrong
+        channel - the file itself is never deleted from disk.
+        Returns a report: {channel_name: [file names moved out]}.
+        The names of files taken out are remembered on the channel
+        as "mixed_files_removed", so a later rescan of its folders
+        does not put them straight back in.
+        """
+        report = {}
+        # Work on a snapshot of names, because channels gain folders
+        # while we move files around.
+        for name in list(self.channels.keys()):
+            data = self.channels.get(name)
+            if not isinstance(data, dict):
+                continue
+            cached = data.get("cached_playlist")
+            if not cached:
+                continue
+            kept = []
+            removed = []
+            for entry in list(cached):
+                try:
+                    _idx, file_path = entry
+                except Exception:
+                    continue
+                if self._name_matches_file(name, file_path):
+                    kept.append(entry)
+                    continue
+                # Does it belong to another channel instead?
+                moved_to = None
+                for other in list(self.channels.keys()):
+                    if other == name:
+                        continue
+                    if self._name_matches_file(other, file_path):
+                        moved_to = other
+                        break
+                if moved_to:
+                    other_data = self.channels[moved_to]
+                    other_cached = other_data.get("cached_playlist") or []
+                    if entry not in other_cached:
+                        other_cached.append(entry)
+                        other_data["cached_playlist"] = other_cached
+                    try:
+                        parent = str(Path(str(file_path)).parent)
+                        folders = other_data.get("folders") or []
+                        if parent not in folders:
+                            folders.append(parent)
+                            other_data["folders"] = folders
+                    except Exception:
+                        pass
+                removed.append(Path(str(file_path)).name)
+                if removed:
+                    data["mixed_files_removed"] = sorted(set(
+                        (data.get("mixed_files_removed") or []) + removed))
+            if removed:
+                data["cached_playlist"] = kept
+                # Keep an empty cache (not no cache) so a later load
+                # does not rescan the folders and put the mixed
+                # files straight back in.
+                report[name] = removed
+        if report:
+            self.save_channels()
+        return report
+
     def repair_channels(self):
         """Repair all loaded channels in place and save atomically.
 

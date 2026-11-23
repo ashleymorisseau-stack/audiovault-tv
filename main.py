@@ -755,6 +755,18 @@ class PlayerFrame(wx.Frame):
                 # Save cache for next time
                 self.channels.update_current_channel(cached_playlist=self.playlist.get_cache_data())
 
+            # Files unmixed out of this channel stay out: a
+            # rescan of its folders must not put them back in.
+            removed_names = set(channel_data.get("mixed_files_removed") or [])
+            if removed_names and self.playlist.playlist:
+                before = len(self.playlist.playlist)
+                self.playlist.playlist = [
+                    (i, fp) for i, fp in self.playlist.playlist
+                    if fp.name not in removed_names]
+                if len(self.playlist.playlist) != before:
+                    self.channels.update_current_channel(
+                        cached_playlist=self.playlist.get_cache_data())
+
             # Clamp the saved index: a file that was deleted could
             # otherwise leave it past the end of the playlist.
             try:
@@ -1268,10 +1280,14 @@ class PlayerFrame(wx.Frame):
         elif command == 'stop_live_tv':
             self._on_livetv_stop()
             return
+        elif command == 'fix_mixed_channels':
+            self._fix_mixed_channels()
+            return
         elif command == 'delete_channel_downloads':
-            # "Samantha, delete A Killer Among Friends downloads"
-            # - asks first, then deletes its files and the channel.
-            self._delete_channel_downloads(query)
+            # "Samantha, delete the show" / "delete A Killer Among
+            # Friends downloads" - deletes right away when she
+            # tells it to, then speaks what was removed.
+            self._delete_channel_downloads(query, confirm=False)
             return
         elif command == 'play_pause':
             self._toggle_play_pause()
@@ -2252,6 +2268,51 @@ class PlayerFrame(wx.Frame):
                 best = result
         return best if best is not None else results[0]
 
+    def _exact_show_results(self, results, query):
+        """Only the actual show Honey named, or None.
+
+        Honey, 2026-11-23: a voice search should find the actual
+        show she asks for, not every title containing the words.
+        "friends" used to come back with 54 results, starting
+        with "A Killer Among Friends". If any result's base title
+        is exactly the name she said, return only those results
+        - all seasons of that exact show, season 1 first, or
+        only the season she named - and nothing else.
+        """
+        import re
+        if not results or not query:
+            return None
+        q = (query or "").lower().strip()
+        q = re.sub(r"\s+(?:us\s+)?new\s+description\s*$", "", q)
+        q = re.sub(r"\s+(?:the\s+)?(?:sitcom|tv\s+show|tv\s+series)\s*$", "", q)
+        q = re.sub(r"\s+(?:us\s+)?new\s+description\s*$", "", q)
+        q = q.strip(" .,")
+        if not q:
+            return None
+        season_wanted = None
+        m = re.search(r"season\s*0*(\d+)", q)
+        if m:
+            season_wanted = int(m.group(1))
+            q = re.sub(r"\s*season\s*0*\d+\s*", " ", q).strip()
+        exact = []
+        for result in results:
+            name = (result[1] or "").lower()
+            base = re.split(r"\s+-\s+season|\s+-\s+|\s*\(", name, 1)[0].strip()
+            if base != q:
+                continue
+            if season_wanted is not None:
+                sm = re.search(r"season\s*0*(\d+)", name)
+                if not sm or int(sm.group(1)) != season_wanted:
+                    continue
+            exact.append(result)
+        if not exact:
+            return None
+        def _season_key(result):
+            sm = re.search(r"season\s*0*(\d+)", (result[1] or "").lower())
+            return int(sm.group(1)) if sm else 0
+        exact.sort(key=_season_key)
+        return exact
+
     def _vault_voice_download_results(self, results, kind, query):
         """Queue the best AudioVault result for a voice download"""
         if not results:
@@ -2318,6 +2379,22 @@ class PlayerFrame(wx.Frame):
             self.status_label.SetLabel(msg)
             speak(msg)
             return
+        # The actual video first: exact title, then a title
+        # starting with the name she said, then the rest in
+        # YouTube's own order. "download it" downloads the first
+        # one, so it should be the actual one she asked for.
+        q = (query or "").lower().strip()
+        if q:
+            def _yt_rank(r):
+                t = (r.get("title") or "").lower().strip()
+                if t == q:
+                    return 0
+                if t.startswith(q):
+                    return 1
+                if q in t:
+                    return 2
+                return 3
+            results = sorted(results, key=_yt_rank)
         self._last_yt_search_results = list(results)
         self._last_search_source = "youtube"
         # _yt_show_results speaks the first few titles and shows the
@@ -2531,11 +2608,21 @@ class PlayerFrame(wx.Frame):
         # the first names she hears are the right show, not the
         # first alphabetical title containing the words.
         query = getattr(self, "_last_search_query", "") or ""
+        exact_only = False
         if query:
-            best = self._pick_best_voice_result(results, query)
-            if best is not None and best is not results[0]:
-                results = [best] + [r for r in results if r is not best]
+            # The actual show first: if she named a show exactly,
+            # show only that show, so "A Killer Among Friends"
+            # never comes up when she asked for Friends.
+            exact = self._exact_show_results(results, query)
+            if exact:
+                results = exact
                 self._last_search_results = list(results)
+                exact_only = True
+            else:
+                best = self._pick_best_voice_result(results, query)
+                if best is not None and best is not results[0]:
+                    results = [best] + [r for r in results if r is not best]
+                    self._last_search_results = list(results)
 
         items = [f"{name} ({av_id})" for av_id, name, link in results]
         # Speak the first few names, so Honey can hear them without
@@ -2543,7 +2630,11 @@ class PlayerFrame(wx.Frame):
         # first one, or pick from the list as before.
         spoken_names = "; ".join(
             f"{i + 1}. {name}" for i, (_, name, _) in enumerate(results[:3]))
-        msg = f"Found {len(items)} results. {spoken_names}."
+        if exact_only:
+            msg = (f"Found the actual show you asked for. "
+                   f"{spoken_names}.")
+        else:
+            msg = f"Found {len(items)} results. {spoken_names}."
         # Live shows found by the same voice search, spoken first
         # so Honey hears them too. Say "play <name> live" to
         # watch one live; "download it" still downloads the first
@@ -3688,6 +3779,46 @@ class PlayerFrame(wx.Frame):
                 wx.CallAfter(self._livetv_error, f"Live channel search error: {e}")
         threading.Thread(target=work, daemon=True).start()
 
+    def _fix_mixed_channels(self):
+        """Unmix shows that are in the wrong channel.
+
+        Honey, 2026-11-23: some shows she already has are still
+        mixed up with other shows. This runs the unmix repair
+        over every channel and speaks what moved out of where.
+        Files are never deleted from disk by this - they are
+        taken out of the wrong channel, and moved to the right
+        channel when one matches their name.
+        """
+        try:
+            report = self.channels.unmix_channels()
+        except Exception as e:
+            msg = f"I could not fix the mixed up shows: {e}"
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        if not report:
+            msg = "I checked every channel, and no shows are mixed up."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        parts = []
+        total = 0
+        for channel, files in report.items():
+            total += len(files)
+            parts.append(f"{len(files)} from {channel}")
+        msg = (f"Fixed the mixed up shows. Took out {total} file(s): "
+               + "; ".join(parts) + ".")
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        # Reload the current channel so what she hears next is
+        # the unmixed playlist, not the old one.
+        try:
+            self.playlist = PlaylistManager()
+            self._load_current_channel()
+            self._update_display()
+        except Exception:
+            pass
+
     # ---- Delete a channel and its downloads ----
     def _find_local_channel(self, query):
         """Find a local channel by name: exact, then starts-with,
@@ -3696,6 +3827,12 @@ class PlayerFrame(wx.Frame):
         if not query:
             return self.channels.current_channel
         q = str(query).strip().lower().replace("amongst", "among")
+        # "delete the show" / "delete this show" / "delete it" -
+        # the show playing right now.
+        if q in ("the show", "this show", "show", "the channel",
+                 "this channel", "channel", "it", "this", "that",
+                 "this episode", "the episode"):
+            return self.channels.current_channel
         if q.startswith("a "):
             q = q[2:]
         names = self.channels.get_channel_list()
@@ -3713,7 +3850,7 @@ class PlayerFrame(wx.Frame):
     def _on_delete_channel_downloads(self, event=None):
         self._delete_channel_downloads(None)
 
-    def _delete_channel_downloads(self, query=None):
+    def _delete_channel_downloads(self, query=None, confirm=True):
         """Delete a channel's downloaded files and remove the channel.
 
         Honey, 2026-11-23: "A Killer Among Friends" - the wrong
@@ -3721,7 +3858,11 @@ class PlayerFrame(wx.Frame):
         downloads gone so it stops coming up. Only files listed in
         that channel's cached playlist, or files in its folders
         whose name matches the channel, are deleted - never a whole
-        shared folder. Asks Yes/No first, like Delete File does.
+        shared folder. The menu version asks Yes/No first, like
+        Delete File does. The voice version does not: Honey said
+        "whenever I tell it to delete the show, it deletes it",
+        so a voice delete deletes right away and then speaks
+        what was removed.
         """
         name = self._find_local_channel(query)
         if not name:
@@ -3755,17 +3896,18 @@ class PlayerFrame(wx.Frame):
                 seen.add(str(f))
                 uniq.append(f)
         files = uniq
-        result = wx.MessageBox(
-            f"Delete {name} and all its downloaded files?\n\n"
-            f"{len(files)} file(s) will be deleted from your computer, "
-            f"and the channel will be removed so it stops coming up.",
-            "Delete Channel and Downloads",
-            wx.YES_NO | wx.ICON_WARNING)
-        if result != wx.YES:
-            msg = f"Okay, I left {name} alone."
-            self.status_label.SetLabel(msg)
-            speak(msg)
-            return
+        if confirm:
+            result = wx.MessageBox(
+                f"Delete {name} and all its downloaded files?\n\n"
+                f"{len(files)} file(s) will be deleted from your computer, "
+                f"and the channel will be removed so it stops coming up.",
+                "Delete Channel and Downloads",
+                wx.YES_NO | wx.ICON_WARNING)
+            if result != wx.YES:
+                msg = f"Okay, I left {name} alone."
+                self.status_label.SetLabel(msg)
+                speak(msg)
+                return
         try:
             self.player.stop()
             self.player.is_playing = False

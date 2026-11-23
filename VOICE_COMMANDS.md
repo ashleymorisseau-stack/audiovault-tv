@@ -59,14 +59,29 @@ Samantha can play live channels, like Game Show Network and other channels. Live
 
 A plain show search does live shows too, as well as AudioVault search and download: "search for Close Enough" searches AudioVault, and if a live channel has the same name Samantha speaks it first, so you can say "play Game Show Network live" to watch it live.
 
+## Fix Shows That Are Mixed Up
+
+If shows you already have are in the wrong channel - Odd Squad playing on the Doctor Who channel, for example - Samantha can sort them out. She takes a file out of a channel it does not belong to, and moves it to the channel it does belong to when there is one. She never deletes the file itself from your computer.
+
+| Say This | Action |
+|----------|--------|
+| "fix the mixed up shows" | Check every channel and take mixed-up files out of the wrong ones |
+| "unmix my shows" | Same as above |
+| "my shows are mixed up" | Same as above |
+
 ## Delete a Channel's Downloads
 
 If a channel's downloads are wrong or you do not like them — for example "A Killer Among Friends", the wrong Friends download — Samantha can get rid of them. She asks Yes or No first, so nothing is deleted by accident. Only that channel's own downloaded files are deleted, never a whole shared folder, and the channel is removed so it stops coming up.
 
 | Say This | Action |
 |----------|--------|
-| "delete A Killer Among Friends downloads" | Ask first, then delete its downloaded files and remove the channel |
-| "delete Friends downloads" | Ask first, then delete that channel's downloaded files and remove the channel |
+| "delete the show" | Delete the show playing right now, and remove its channel |
+| "delete this show" | Delete the show playing right now, and remove its channel |
+| "delete Friends" | Delete the Friends show and remove its channel |
+| "delete A Killer Among Friends downloads" | Delete its downloaded files and remove the channel |
+| "delete Friends downloads" | Delete that channel's downloaded files and remove the channel |
+
+When you tell Samantha by voice to delete a show, she deletes it right away and then tells you what she removed. The menu version still asks Yes or No first.
 
 You can also do this from the menu: Channels, then "Delete Channel and Downloads" (Ctrl+Shift+D) for the current channel.
 
@@ -118,7 +133,7 @@ You can also do this from the menu: Channels, then "Delete Channel and Downloads
 ### Search and Download on AudioVault.net
 | Say This | Action |
 |----------|--------|
-| "search for Friends the sitcom new description" | Search AudioVault.net for Friends, and pick the exact Friends sitcom, Season 1, US New Description — not the first title containing the word, like "A Killer Among Friends" |
+| "search for Friends the sitcom new description" | Search AudioVault.net for Friends, and show only the actual Friends sitcom, Season 1, US New Description — not every title containing the word, like "A Killer Among Friends" |
 | "search for a TV show Close Enough" | Search AudioVault.net for that TV show, and speak the first few results |
 | "download Friends" | Search AudioVault and download the exact Friends show, Season 1 New Description, in the background — this exact-match pick works for every show you mention, not just Friends |
 | "find a TV show Chicago Party Aunt" | Search AudioVault.net for that TV show |
