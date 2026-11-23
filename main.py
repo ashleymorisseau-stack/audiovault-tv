@@ -224,6 +224,8 @@ class PlayerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._toggle_voice_listening, voice_listen_item)
         wake_word_item = controls_menu.Append(wx.ID_ANY, "Wake Word Mode\tCtrl+Shift+W", "Toggle continuous wake word listening")
         self.Bind(wx.EVT_MENU, self._toggle_wake_word_mode, wake_word_item)
+        tv_guide_item = controls_menu.Append(wx.ID_ANY, "What's Coming Up Next\tCtrl+Shift+G", "Hear the TV guide: what is playing now and what comes up next")
+        self.Bind(wx.EVT_MENU, self._on_tv_guide, tv_guide_item)
         controls_menu.AppendSeparator()
         toggle_sounds_item = controls_menu.Append(wx.ID_ANY, "Toggle Sounds\tCtrl+Shift+S", "Turn startup/exit sounds on or off")
         self.Bind(wx.EVT_MENU, self._toggle_sounds, toggle_sounds_item)
@@ -995,6 +997,22 @@ class PlayerFrame(wx.Frame):
                         msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
                         self.status_label.SetLabel(msg)
                         speak(msg)
+                        # TV guide, automatic: say what comes up
+                        # after this one, so Honey always knows
+                        # what is next without asking.
+                        coming = self.playlist.peek_next_file_name()
+                        if coming:
+                            speak(f"Coming up next: {coming}")
+                        else:
+                            nxt_ch = self.channels.peek_next_channel()
+                            if nxt_ch:
+                                speak(f"Coming up next: {nxt_ch}")
+                        # Marathon starting: this file begins three
+                        # or more of the same show in a row.
+                        if self._marathon_starting():
+                            show = self._show_base(self.playlist.get_current_file_name())
+                            show_name = self.playlist.get_current_file_name().split(" - ")[0].strip()
+                            speak(f"A marathon of {show_name} is starting.")
                         self._save_current_channel_state()
                     else:
                         # No more files in current channel
@@ -1279,6 +1297,16 @@ class PlayerFrame(wx.Frame):
             return
         elif command == 'stop_live_tv':
             self._on_livetv_stop()
+            return
+        elif command == 'whats_next':
+            # "Samantha, what's coming up next?" / "give me the
+            # TV guide" - Samantha reads the whole guide.
+            self._speak_tv_guide()
+            return
+        elif command == 'livetv_guide':
+            # "Samantha, what's coming up next on Game Show
+            # Network?" - a guide for that live channel.
+            self._speak_livetv_guide(query)
             return
         elif command == 'fix_mixed_channels':
             self._fix_mixed_channels()
@@ -3818,6 +3846,177 @@ class PlayerFrame(wx.Frame):
             self._update_display()
         except Exception:
             pass
+
+    @staticmethod
+    def _show_base(file_name):
+        """The show a file belongs to, for marathon detection.
+
+        "Doctor Who - S01E02.mp3" -> "doctor who";
+        "Friends - Season 02 (1994).mp3" -> "friends".
+        """
+        import re
+        base = re.split(r"\s+-\s+|\s*\(|\s+S\d+E\d+", str(file_name), 1)[0].strip().lower()
+        base = re.sub(r"^(?:a|the)\s+", "", base)
+        return base
+
+    def _marathon_ahead(self, count=3):
+        """A marathon coming up in this channel, or None.
+
+        A marathon is three or more files of the same show in a
+        row, starting with the next file. Returns the show name
+        as written on the files, e.g. "Doctor Who".
+        """
+        playlist = getattr(self, "playlist", None)
+        if not playlist or not playlist.playlist:
+            return None
+        idx = playlist.current_index
+        upcoming = playlist.playlist[idx + 1: idx + 1 + count]
+        if len(upcoming) < count:
+            return None
+        bases = [self._show_base(str(fp.name)) for _, fp in upcoming]
+        if len(set(bases)) == 1 and bases[0]:
+            return str(upcoming[0][1].name).split(" - ")[0].strip()
+        return None
+
+    def _marathon_starting(self, count=3):
+        """True if the file playing now starts a marathon: this
+        file and the next two are the same show, and the file
+        before it was a different show (or there was none)."""
+        playlist = getattr(self, "playlist", None)
+        if not playlist or not playlist.playlist:
+            return False
+        idx = playlist.current_index
+        run = playlist.playlist[idx: idx + count]
+        if len(run) < count:
+            return False
+        bases = [self._show_base(str(fp.name)) for _, fp in run]
+        if len(set(bases)) != 1 or not bases[0]:
+            return False
+        if idx > 0:
+            before = self._show_base(str(playlist.playlist[idx - 1][1].name))
+            if before == bases[0]:
+                return False
+        return True
+
+    def _livetv_guide_text(self, channel_name=None):
+        """A guide for one live channel, e.g. Game Show Network.
+
+        Honey, 2026-11-23: "have her give me another guide
+        for the game show network too so that I know what's
+        coming up next." Live TV has no programme schedule in
+        its catalogue - only channel names - so this guide
+        names the live channel and the live channels coming
+        up after it. It cannot name the actual game shows
+        playing on Game Show Network, because the live
+        catalogue carries no programme listings.
+        """
+        try:
+            all_ch = livetv.get_all_channels() if LIVETV_AVAILABLE else []
+        except Exception:
+            all_ch = []
+        if not all_ch:
+            return "I could not load the live channels right now."
+        wanted = (channel_name or "game show network").strip().lower()
+        match = None
+        for c in all_ch:
+            if wanted in c["name"].lower() or c["name"].lower() in wanted:
+                match = c
+                break
+        if not match:
+            return f"I could not find {channel_name or 'that live channel'}."
+        name = match["name"]
+        names = [c["name"] for c in all_ch]
+        i = names.index(name)
+        nxt = [names[(i + 1 + k) % len(names)] for k in range(min(3, len(names) - 1))]
+        live = getattr(self, "_livetv_last_channel", None)
+        if live and live.get("name", "").lower() == name.lower():
+            text = f"Now on live TV: {name}."
+        else:
+            text = f"{name} is on live TV now."
+        if nxt:
+            text += " Coming up next on live: " + ", ".join(nxt) + "."
+        return text
+
+    def _speak_livetv_guide(self, channel_name=None):
+        """Read one live channel's guide, Samantha first."""
+        self._play_sound_effect("samantha_coming_up_next.wav")
+        text = self._livetv_guide_text(channel_name)
+        self.status_label.SetLabel(text)
+        speak(text)
+
+    def _up_next_text(self):
+        """The whole TV guide as one spoken text.
+
+        Honey, 2026-11-23: "give me like the whole TV guide
+        of what's coming up next." What is playing now, what
+        comes up next in this channel, and what channel comes
+        after this one. Live TV has no programme schedule in
+        its catalogue - only channel names - so for live the
+        guide names the live channel now and the next live
+        channels after it.
+        """
+        parts = []
+        live = getattr(self, "_livetv_last_channel", None)
+        if live:
+            parts.append(f"Now on live TV: {live.get('name', 'live TV')}.")
+            try:
+                favs = livetv.get_favorite_channels() if LIVETV_AVAILABLE else []
+                all_ch = livetv.get_all_channels() if LIVETV_AVAILABLE else []
+                pool = [c["name"] for c in favs] or [c["name"] for c in all_ch]
+                cur = live.get("name")
+                if cur in pool:
+                    i = pool.index(cur)
+                    nxt = [pool[(i + 1 + k) % len(pool)] for k in range(min(3, len(pool) - 1))]
+                else:
+                    nxt = pool[:3]
+                if nxt:
+                    parts.append("Coming up next on live: " + ", ".join(nxt) + ".")
+            except Exception:
+                pass
+            return " ".join(parts)
+        channel = self.channels.current_channel or ""
+        current = self.playlist.get_current_file_name()
+        if channel and current:
+            parts.append(f"Now playing on {channel}: {current}.")
+        elif channel:
+            parts.append(f"Now on {channel}.")
+        else:
+            return "Nothing is playing right now."
+        marathon = self._marathon_ahead()
+        if marathon:
+            parts.append(f"A marathon of {marathon} is coming up next.")
+        nxt_file = self.playlist.peek_next_file_name()
+        if nxt_file:
+            parts.append(f"Coming up next: {nxt_file}.")
+            nxt_ch = self.channels.peek_next_channel()
+            if nxt_ch and nxt_ch != channel:
+                parts.append(f"After that, the next channel is {nxt_ch}.")
+        else:
+            nxt_ch = self.channels.peek_next_channel()
+            if nxt_ch:
+                parts.append(
+                    f"That is the last one on {channel}. "
+                    f"Coming up next: {nxt_ch}.")
+        return " ".join(parts)
+
+    def _speak_tv_guide(self, event=None):
+        """Read the whole TV guide out loud.
+
+        Samantha says "Here's what's coming up next!" in her
+        own recorded voice first, then the guide itself - the
+        show names, which change every time - is read in the
+        app's usual speaking voice, because Samantha's voice
+        is recordings and cannot read new show names she never
+        recorded.
+        """
+        self._play_sound_effect("samantha_coming_up_next.wav")
+        text = self._up_next_text()
+        self.status_label.SetLabel(text)
+        speak(text)
+
+    def _on_tv_guide(self, event=None):
+        """Menu / Ctrl+Shift+G: read the TV guide."""
+        self._speak_tv_guide()
 
     # ---- Delete a channel and its downloads ----
     def _find_local_channel(self, query):

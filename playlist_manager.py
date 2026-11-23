@@ -47,6 +47,25 @@ class PlaylistManager:
         mp3_files = [f for f in folder_path.iterdir() if f.suffix.lower() == '.mp3']
         return sorted(mp3_files, key=lambda x: natural_sort_key(x.name))
     
+    def peek_next(self):
+        """The next file after the current one, without moving.
+
+        For the TV guide: Samantha tells Honey what is coming
+        up next without changing what is playing now.
+        """
+        if not self.playlist:
+            return None
+        if self.current_index + 1 < len(self.playlist):
+            return self.playlist[self.current_index + 1]
+        return None
+
+    def peek_next_file_name(self):
+        """Name of the next file, or None if this is the last one."""
+        nxt = self.peek_next()
+        if nxt:
+            return Path(nxt[1]).name
+        return None
+
     def get_current(self):
         """Get current file info"""
         if not self.playlist or self.current_index >= len(self.playlist):

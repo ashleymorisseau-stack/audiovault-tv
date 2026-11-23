@@ -226,6 +226,31 @@ class VoiceControl:
         if name_command is not None:
             return name_command
 
+        # --- Game Show Network guide: Honey asked 2026-11-23
+        # for another guide for the Game Show Network, so she
+        # knows what is coming up next there. Checked before the
+        # general TV guide, so "on Game Show Network" is not
+        # swallowed by it.
+        if "game show network" in text and ("next" in text or "guide" in text or "coming up" in text or "what" in text):
+            m = re.search(r"(?:on|for)\s+(?:the\s+)?game show network", text)
+            return ('livetv_guide', 'game show network')
+        if re.search(r"\bwhat(?:'s| is) (?:on|coming up)(?: next)? on\b", text):
+            m = re.search(r"\bon\s+(.+)$", text)
+            if m:
+                return ('livetv_guide', m.group(1).strip())
+
+        # --- TV guide: Honey asked 2026-11-23 for the whole
+        # TV guide of what is coming up next, read by Samantha.
+        # Checked before search, so "what's next" is not
+        # swallowed by a show search.
+        if re.search(
+                r"\b(?:what(?:'s| is)|tell me|give me|samantha,?\s+)?"
+                r"(?:what(?:'s| is)\s+)?(?:coming up|on|next|up next)\b",
+                text) and ("next" in text or "guide" in text or "coming up" in text):
+            return 'whats_next'
+        if "tv guide" in text or "television guide" in text:
+            return 'whats_next'
+
         # --- Fix mixed-up shows: Honey asked 2026-11-23 that
         # shows she already has are still mixed up with other
         # shows. Checked before search/download, so "fix the
@@ -516,6 +541,13 @@ class VoiceControl:
             # "search Close Enough on YouTube" is caught by the first
             # pattern; "search Close Enough YouTube" by this one.
             r"(?:search|find)\s+(?:for\s+)?(.+?)\s+youtube\s*$",
+            # "get Young Sheldon Who Wants to Be a Millionaire on
+            # YouTube" - Honey, 2026-11-23: "get" means find it
+            # for her on YouTube, so this is a YouTube search,
+            # not a download. She picks from the results, or
+            # says "download it" after.
+            r"(?:get|fetch|bring(?:\s+me)?|show\s+me)\s+(?:me\s+)?"
+            r"(?:a\s+|an\s+|the\s+)?(.+?)\s+(?:on|from)\s+youtube\b",
         ]
         for pattern in patterns:
             match = re.search(pattern, text)

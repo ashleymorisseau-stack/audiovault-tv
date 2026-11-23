@@ -59,6 +59,32 @@ Samantha can play live channels, like Game Show Network and other channels. Live
 
 A plain show search does live shows too, as well as AudioVault search and download: "search for Close Enough" searches AudioVault, and if a live channel has the same name Samantha speaks it first, so you can say "play Game Show Network live" to watch it live.
 
+## TV Guide - What Is Coming Up Next
+
+Samantha reads the whole TV guide: what is playing now, what comes up next in this channel, and what channel comes after this one. She says "Here's what's coming up next!" in her own recorded voice first, then the guide itself is read in the app's usual speaking voice, because Samantha's voice is recordings and she cannot read new show names she never recorded. When one show finishes and the next one starts, she also says what is coming up after that one, without you asking. Live TV has no programme schedule, only channel names, so the live guide names the live channel now and the next live channels after it.
+
+| Say This | Action |
+|----------|--------|
+| "what's coming up next" | Read the whole TV guide |
+| "what is next" | Read the whole TV guide |
+| "give me the TV guide" | Read the whole TV guide |
+| "tell me what's coming up next" | Read the whole TV guide |
+
+You can also open it from the Controls menu, "What's Coming Up Next", Ctrl+Shift+G.
+
+## Game Show Network Guide
+
+| Say This | Action |
+|----------|--------|
+| "what's coming up next on Game Show Network" | Read the Game Show Network guide: the live channel now and the live channels coming up after it |
+| "give me the Game Show Network guide" | Same as above |
+
+Live TV has no programme schedule in its catalogue, only channel names, so this guide cannot name the actual game shows playing on Game Show Network. A free programme guide does exist for many channels from iptv-org, but it is not wired into Audio Vault TV yet.
+
+## Marathon Starting
+
+A marathon is three or more episodes of the same show in a row in one of your channels. When one is coming up, the TV guide says so: "A marathon of Doctor Who is coming up next." And when a marathon starts playing, Samantha says so right then: "A marathon of Doctor Who is starting." For live TV, marathons cannot be seen, because the live catalogue has no programme listings.
+
 ## Fix Shows That Are Mixed Up
 
 If shows you already have are in the wrong channel - Odd Squad playing on the Doctor Who channel, for example - Samantha can sort them out. She takes a file out of a channel it does not belong to, and moves it to the channel it does belong to when there is one. She never deletes the file itself from your computer.

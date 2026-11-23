@@ -614,6 +614,18 @@ class ChannelManager:
                 self.channels[self.current_channel]['cached_playlist'] = cached_playlist
             self.save_channels()
     
+    def peek_next_channel(self):
+        """Name of the channel after the current one, without
+        switching. For the TV guide: what comes up after this
+        channel finishes."""
+        channel_list = sorted(self.channels.keys())
+        if not channel_list:
+            return None
+        if not self.current_channel or self.current_channel not in channel_list:
+            return channel_list[0]
+        idx = channel_list.index(self.current_channel)
+        return channel_list[(idx + 1) % len(channel_list)]
+
     def get_channel_list(self):
         """Get sorted list of channel names"""
         return sorted(self.channels.keys())
