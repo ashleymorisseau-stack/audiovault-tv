@@ -189,6 +189,11 @@ class PlayerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_rename_channel, rename_channel_item)
         delete_channel_item = channels_menu.Append(wx.ID_ANY, "Delete Channel\tCtrl+D", "Delete current channel")
         self.Bind(wx.EVT_MENU, self._on_delete_channel, delete_channel_item)
+        # Honey, 2026-11-23: get rid of a channel's downloads, e.g.
+        # "A Killer Among Friends" - deletes its downloaded files
+        # from disk and removes the channel, so it stops coming up.
+        delete_dl_item = channels_menu.Append(wx.ID_ANY, "Delete Channel and Downloads\tCtrl+Shift+D", "Delete the current channel and all its downloaded files")
+        self.Bind(wx.EVT_MENU, self._on_delete_channel_downloads, delete_dl_item)
         channels_menu.AppendSeparator()
         list_channels_item = channels_menu.Append(wx.ID_ANY, "List Channels\tCtrl+L", "Show list of all channels")
         self.Bind(wx.EVT_MENU, self._on_list_channels, list_channels_item)
@@ -1209,7 +1214,66 @@ class PlayerFrame(wx.Frame):
         if isinstance(command, tuple):
             command, query = command
 
-        if command == 'play_pause':
+        if command == 'set_name':
+            # Honey, 2026-11-23: Samantha learns her name when Honey
+            # tells it to her by voice, and remembers it in config.ini
+            # (local only, never pushed to GitHub) via _set_user_name.
+            if query:
+                self._set_user_name(query)
+                msg = f"Got it, {query}. I'll remember your name is {query}."
+            else:
+                msg = "I didn't hear a name. Tell me, say my name is Honey."
+        elif command == 'what_is_my_name':
+            name = self._get_user_name()
+            if name:
+                msg = f"Your name is {name}, and I remember it."
+            else:
+                msg = ("I don't know your name yet. Tell me, "
+                       "say my name is Honey.")
+        elif command == 'forget_name':
+            self._set_user_name("")
+            msg = ("Okay, I've forgotten your name. Tell me again any "
+                   "time, just say my name is Honey.")
+        elif command == 'what_is_your_name':
+            # Honey, 2026-11-23: Samantha's own recorded voice, a
+            # little louder, friendly - "Hi, my name is Samantha.
+            # What is your name?" - plays first, then NVDA speaks
+            # the same words as a fallback.
+            self._play_sound_effect("samantha_greeting.wav")
+            msg = "My name is Samantha. I'm your voice helper for Audio Vault TV."
+        elif command == 'greet':
+            name = self._get_user_name()
+            if name:
+                # Samantha asks, in her own recorded voice, what
+                # Honey wants to watch.
+                self._play_sound_effect("samantha_what_to_watch.wav")
+                msg = f"Hi {name}! I'm Samantha. I'm listening."
+            else:
+                self._play_sound_effect("samantha_greeting.wav")
+                msg = ("Hi! I'm Samantha. I'm listening. Tell me your "
+                       "name any time, just say my name is Honey.")
+        elif command == 'play_live_tv':
+            # "Samantha, play live TV" - a favourite live channel
+            # first, otherwise the first live channel.
+            self._livetv_voice_play(None)
+            return
+        elif command == 'play_live_channel':
+            # "Samantha, play Game Show Network live" - and any
+            # other live channel by name.
+            self._livetv_voice_play(query)
+            return
+        elif command == 'search_live_channels':
+            self._livetv_voice_search(query)
+            return
+        elif command == 'stop_live_tv':
+            self._on_livetv_stop()
+            return
+        elif command == 'delete_channel_downloads':
+            # "Samantha, delete A Killer Among Friends downloads"
+            # - asks first, then deletes its files and the channel.
+            self._delete_channel_downloads(query)
+            return
+        elif command == 'play_pause':
             self._toggle_play_pause()
             msg = f"Command recognized: {text}"
         elif command == 'next_file':
@@ -1362,7 +1426,14 @@ class PlayerFrame(wx.Frame):
     def _wake_word_detected(self):
         """Handle wake word detection"""
         self._play_sound_effect("start_of_request.wav")
-        msg = "Listening..."
+        # Honey, 2026-11-23: when Samantha is heard, she asks in
+        # her own recorded, friendly voice: "What do you want to
+        # watch?" - a little louder than the first recording.
+        self._play_sound_effect("samantha_what_to_watch.wav")
+        # Samantha greets Honey by name, when she has told Samantha
+        # her name by voice (see _parse_name_command / _set_user_name).
+        name = self._get_user_name()
+        msg = f"Hi {name}, I'm listening" if name else "Listening..."
         self.status_label.SetLabel(msg)
         speak(msg)
     
@@ -3510,6 +3581,183 @@ class PlayerFrame(wx.Frame):
         # completion logic (which offers to create a channel).
         self._yt_download_idx += 1
         wx.CallLater(1000, self._yt_download_next)
+
+    # ---- Samantha voice: live TV by voice ----
+    def _livetv_voice_play(self, query):
+        """Play a live channel by voice, in the background.
+
+        Honey, 2026-11-23: "Samantha, play Game Show Network live"
+        and other channels. No name = a favourite live channel
+        first, otherwise the first live channel. With a name, the
+        exact channel name wins, then a name that starts with it,
+        then any channel containing it.
+        """
+        def work():
+            try:
+                if not LIVETV_AVAILABLE or livetv is None:
+                    wx.CallAfter(self._livetv_voice_play_done, None, query,
+                                 "Live TV is not available.")
+                    return
+                livetv.refresh_catalog()
+                channels = livetv.get_all_channels()
+                if not channels:
+                    wx.CallAfter(self._livetv_voice_play_done, None, query,
+                                 "No live channels were found.")
+                    return
+                if not query:
+                    channel = self._livetv_pick_fallback_channel(channels)
+                    wx.CallAfter(self._livetv_voice_play_done, channel, query, None)
+                    return
+                q = str(query).strip().lower()
+                channel = None
+                for c in channels:
+                    if c["name"].lower() == q:
+                        channel = c
+                        break
+                if channel is None:
+                    for c in channels:
+                        if c["name"].lower().startswith(q):
+                            channel = c
+                            break
+                if channel is None:
+                    for c in channels:
+                        if q in c["name"].lower():
+                            channel = c
+                            break
+                wx.CallAfter(self._livetv_voice_play_done, channel, query, None)
+            except Exception as e:
+                wx.CallAfter(self._livetv_voice_play_done, None, query, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _livetv_voice_play_done(self, channel, query, error):
+        if error:
+            msg = error
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        if not channel:
+            msg = (f"I couldn't find a live channel called {query}."
+                   if query else "I couldn't find a live channel to play.")
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        self._livetv_play(channel)
+
+    def _livetv_voice_search(self, query):
+        """Search live channels by voice, then show the list to pick from."""
+        def work():
+            try:
+                if not LIVETV_AVAILABLE or livetv is None:
+                    wx.CallAfter(self._livetv_error, "Live TV is not available.")
+                    return
+                livetv.refresh_catalog()
+                results = livetv.search_channels(query) if query else livetv.get_all_channels()
+                wx.CallAfter(self._livetv_show_channel_list, results,
+                             f"Live TV search: {query}" if query else "Live TV channels")
+            except Exception as e:
+                wx.CallAfter(self._livetv_error, f"Live channel search error: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- Delete a channel and its downloads ----
+    def _find_local_channel(self, query):
+        """Find a local channel by name: exact, then starts-with,
+        then contains. "killer among friends" matches
+        "A Killer Among Friends", with "amongst" normalised to "among"."""
+        if not query:
+            return self.channels.current_channel
+        q = str(query).strip().lower().replace("amongst", "among")
+        if q.startswith("a "):
+            q = q[2:]
+        names = self.channels.get_channel_list()
+        for name in names:
+            if name.lower() == q or name.lower() == str(query).strip().lower():
+                return name
+        for name in names:
+            if name.lower().startswith(q):
+                return name
+        for name in names:
+            if q in name.lower():
+                return name
+        return None
+
+    def _on_delete_channel_downloads(self, event=None):
+        self._delete_channel_downloads(None)
+
+    def _delete_channel_downloads(self, query=None):
+        """Delete a channel's downloaded files and remove the channel.
+
+        Honey, 2026-11-23: "A Killer Among Friends" - the wrong
+        Friends download - she does not like it and wants its
+        downloads gone so it stops coming up. Only files listed in
+        that channel's cached playlist, or files in its folders
+        whose name matches the channel, are deleted - never a whole
+        shared folder. Asks Yes/No first, like Delete File does.
+        """
+        name = self._find_local_channel(query)
+        if not name:
+            msg = (f"I couldn't find a channel called {query}, so I didn't delete anything."
+                   if query else "No channel is selected, so I didn't delete anything.")
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        data = self.channels.channels.get(name, {})
+        folders = data.get("folders") or []
+        cached = data.get("cached_playlist") or []
+        files = []
+        for _idx, fp in cached:
+            try:
+                files.append(Path(str(fp)))
+            except Exception:
+                pass
+        if not files and folders:
+            needle = name.lower().replace("a killer among friends", "killer among friends")
+            for folder in folders:
+                try:
+                    for fp in Path(str(folder)).rglob("*"):
+                        if fp.is_file() and needle in fp.name.lower():
+                            files.append(fp)
+                except Exception:
+                    pass
+        seen = set()
+        uniq = []
+        for f in files:
+            if str(f) not in seen and f.exists():
+                seen.add(str(f))
+                uniq.append(f)
+        files = uniq
+        result = wx.MessageBox(
+            f"Delete {name} and all its downloaded files?\n\n"
+            f"{len(files)} file(s) will be deleted from your computer, "
+            f"and the channel will be removed so it stops coming up.",
+            "Delete Channel and Downloads",
+            wx.YES_NO | wx.ICON_WARNING)
+        if result != wx.YES:
+            msg = f"Okay, I left {name} alone."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        try:
+            self.player.stop()
+            self.player.is_playing = False
+        except Exception:
+            pass
+        deleted = 0
+        for fp in files:
+            try:
+                fp.unlink()
+                deleted += 1
+            except Exception as e:
+                self.logger.log_error(f"DELETE DOWNLOADS: {fp} - {e}")
+        self.channels.delete_channel(name)
+        self.playlist = PlaylistManager()
+        self._load_current_channel()
+        self._update_display()
+        self._update_title()
+        msg = f"Removed {name}. Deleted {deleted} downloaded file(s)."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self.logger.log_channel("DELETE-DOWNLOADS", name, f"deleted {deleted} file(s)")
+
 
     # ---- Live TV fallback: play Live TV when no local show is available ----
     def _livetv_pick_fallback_channel(self, channels):
