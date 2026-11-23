@@ -34,7 +34,7 @@ def _kind_from_text(text):
 
 class VoiceControl:
     # Honey asked for more time to speak, 2026-11-23. These used to be
-    # 5 seconds for a one-time command and only 3 seconds after "Sam",
+    # 5 seconds for a one-time command and only 3 seconds after "Samantha",
     # which cut off slow speech and long show names.
     ONE_TIME_LISTEN_SECONDS = 10
     WAKE_WORD_COMMAND_SECONDS = 8
@@ -47,7 +47,7 @@ class VoiceControl:
         self.is_listening = False
         self.wake_word_active = False
         self.audio_queue = queue.Queue()
-        self.wake_word = "sam"
+        self.wake_word = "samantha"
 
         # Initialize model
         if self.model_path.exists():
@@ -122,9 +122,9 @@ class VoiceControl:
                                 # Wake word detected, notify callback
                                 callback('wake_word_detected')
 
-                                # "Sam, play" often arrives as one
+                                # "Samantha, play" often arrives as one
                                 # utterance, so keep anything said after
-                                # "Sam" in that same breath as the command
+                                # "Samantha" in that same breath as the command
                                 # instead of throwing it away and waiting
                                 # for a second utterance.
                                 remainder = text.split(self.wake_word, 1)[1]
