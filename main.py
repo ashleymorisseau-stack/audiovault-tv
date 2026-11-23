@@ -2476,12 +2476,22 @@ class PlayerFrame(wx.Frame):
             self.status_label.SetLabel(msg)
             speak(msg)
             return
+        # Honey, 2026-11-23: a voice YouTube download goes in
+        # its own folder named after the show, so a channel can be
+        # made from it when the download finishes.
+        import audiovault_client as _av
+        subfolder = _av.sanitize_filename(self._suggest_channel_name(title))
         dest = yt.load_download_dir()
+        if subfolder:
+            dest = os.path.join(dest, subfolder)
         os.makedirs(dest, exist_ok=True)
         self._yt_download_queue = [(title, url)]
         self._yt_download_dest = dest
         self._yt_download_idx = 0
-        self._yt_download_subfolder = None
+        self._yt_download_subfolder = subfolder if subfolder else None
+        # Voice downloads make their channel by themselves,
+        # with no pop-up question.
+        self._auto_create_channel = True
         self._bg_cancel_requested = False
         self._yt_cancel_requested = False
         self._bg_yt_percent = 0
@@ -2506,6 +2516,9 @@ class PlayerFrame(wx.Frame):
         os.makedirs(dest, exist_ok=True)
         self.download_queue = [(name, link)]
         self.download_create_channel = False
+        # Honey, 2026-11-23: a voice download makes its channel
+        # by itself when it finishes, with no pop-up question.
+        self._auto_create_channel = True
         self.download_dest = dest
         self.download_queue_index = 0
         self._bg_cancel_requested = False
@@ -2847,8 +2860,16 @@ class PlayerFrame(wx.Frame):
             # online-only in OneDrive (they stay playable, download on demand).
             self._maybe_free_up_space(self.download_dest)
 
-            # Offer channel creation if downloaded to subfolder
-            if self.download_subfolder:
+            # Voice downloads make their channel by themselves,
+            # with no pop-up question. Anything else still gets
+            # the Yes/No offer, as before.
+            if getattr(self, "_auto_create_channel", False):
+                self._auto_create_channel = False
+                if self.download_subfolder:
+                    self._create_channel_from_download(
+                        self.download_subfolder, self.download_dest,
+                        source="VAULT")
+            elif self.download_subfolder:
                 self._vault_offer_channel_creation()
             return
 
@@ -3550,8 +3571,16 @@ class PlayerFrame(wx.Frame):
             speak(msg)
             # Free local disk space if the auto cloud-cleanup setting is on
             self._maybe_free_up_space(self._yt_download_dest)
-            # If everything was grouped into a subfolder, offer to make a channel
-            if getattr(self, "_yt_download_subfolder", None):
+            # Voice downloads make their channel by themselves,
+            # with no pop-up question. Anything else still gets
+            # the Yes/No offer, as before.
+            if getattr(self, "_auto_create_channel", False):
+                self._auto_create_channel = False
+                if getattr(self, "_yt_download_subfolder", None):
+                    self._create_channel_from_download(
+                        self._yt_download_subfolder,
+                        self._yt_download_dest, source="YOUTUBE")
+            elif getattr(self, "_yt_download_subfolder", None):
                 self._yt_offer_channel_creation()
             return
 
@@ -3858,6 +3887,71 @@ class PlayerFrame(wx.Frame):
         base = re.split(r"\s+-\s+|\s*\(|\s+S\d+E\d+", str(file_name), 1)[0].strip().lower()
         base = re.sub(r"^(?:a|the)\s+", "", base)
         return base
+
+    @staticmethod
+    def _folders_with_mp3_files(dest):
+        """Every folder under dest that holds MP3 files, sorted
+        naturally. Pure file work, so it is easy to test."""
+        from playlist_manager import natural_sort_key
+        folders = []
+        for root, dirs, files in os.walk(dest):
+            dirs.sort(key=natural_sort_key)
+            if any(f.lower().endswith(".mp3") for f in files):
+                folders.append(root)
+        return folders
+
+    def _create_channel_from_download(self, channel_name, dest, source="VAULT"):
+        """Make (or add to) a channel from downloaded files, with no
+        pop-up question. Honey, 2026-11-23: when Samantha searches
+        and downloads a show, the channel should just be made.
+        If the channel already exists, the new folders are added to
+        it - nothing is ever replaced or deleted here. Returns True
+        when a channel was made or added to."""
+        import shutil
+        # Flatten any double-nested folders first, as the manual
+        # channel offer does.
+        for root, dirs, files in os.walk(dest, topdown=False):
+            for d in dirs:
+                dir_path = os.path.join(root, d)
+                try:
+                    contents = os.listdir(dir_path)
+                    if len(contents) == 1:
+                        inner = os.path.join(dir_path, contents[0])
+                        if os.path.isdir(inner):
+                            if contents[0] == d or contents[0].lower().startswith(d.lower()) or d.lower().startswith(contents[0].lower()):
+                                for item in os.listdir(inner):
+                                    shutil.move(os.path.join(inner, item), dir_path)
+                                os.rmdir(inner)
+                except Exception:
+                    pass
+        folders = self._folders_with_mp3_files(dest)
+        if not folders:
+            msg = f"Downloaded {channel_name}, but I found no MP3 files, so I could not make a channel for it."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return False
+        if channel_name in self.channels.channels:
+            existing = self.channels.channels[channel_name].get("folders", [])
+            combined = existing + [f for f in folders if f not in existing]
+            self.channels.switch_channel(channel_name)
+            self.channels.update_current_channel(folders=combined)
+            made = False
+        else:
+            self.channels.create_channel(channel_name)
+            self.channels.update_current_channel(folders=folders)
+            made = True
+        self.playlist = PlaylistManager()
+        self._load_current_channel()
+        self._update_title()
+        self._update_display()
+        if made:
+            msg = f"Channel {channel_name} created, with {len(folders)} folder{'s' if len(folders) != 1 else ''}."
+        else:
+            msg = f"Added the new files to your {channel_name} channel."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self.logger.log_channel(source, "CHANNEL-CREATE", f"{channel_name} with {len(folders)} folders")
+        return True
 
     def _marathon_ahead(self, count=3):
         """A marathon coming up in this channel, or None.

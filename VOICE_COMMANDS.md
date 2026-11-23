@@ -72,6 +72,10 @@ Samantha reads the whole TV guide: what is playing now, what comes up next in th
 
 You can also open it from the Controls menu, "What's Coming Up Next", Ctrl+Shift+G.
 
+## Voice Downloads Make Their Own Channel
+
+When Samantha searches for a show and downloads it - from AudioVault.net or from YouTube - she also makes a channel for it by herself, with no pop-up question. The channel is named after the show, and it holds the folders the files downloaded into. If a channel with that name already exists, the new files are added to it; nothing is ever replaced or deleted. When the download finishes she says so, for example "Channel Young Sheldon created, with 2 folders." Say "Samantha, get Young Sheldon Who Wants to Be a Millionaire on YouTube" and, after the download, the Young Sheldon channel is there ready to play.
+
 ## Game Show Network Guide
 
 | Say This | Action |
