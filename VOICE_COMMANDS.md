@@ -4,7 +4,7 @@
 
 ### Mode 1: One-Time Command (Ctrl+Shift+B)
 1. Press **Ctrl+Shift+B** to start listening
-2. Speak your command clearly within 10 seconds
+2. Speak your command clearly within 20 seconds. It keeps listening through a short pause, so you do not have to rush.
 3. The app will recognize and execute the command
 4. Press **Ctrl+Shift+B** again to stop listening early
 
@@ -221,8 +221,9 @@ Saying "Samantha, play" in one breath works too — the words after "Samantha" a
 - **Recognition Engine**: Vosk (offline speech recognition)
 - **Model**: vosk-model-small-en-us-0.15
 - **Wake Word**: "Samantha"
-- **One-Time Listening Duration**: 10 seconds per activation
-- **Wake Word Command Duration**: 8 seconds after "Samantha" is detected
+- **One-Time Listening Duration**: 20 seconds per activation
+- **Wake Word Command Duration**: 15 seconds after "Samantha" is detected
+- **Pause Grace**: keeps listening for 2.5 seconds after the first words, so a pause does not cut a command off
 - **Language**: English (US)
 
 ## Coming Soon

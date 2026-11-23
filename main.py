@@ -1217,9 +1217,9 @@ class PlayerFrame(wx.Frame):
     def _voice_listen_thread(self):
         """Thread for voice listening"""
         try:
-            # Honey asked for more time to speak: 10 seconds, up from 5.
+            # Honey asked for more time to speak: 20 seconds, up from 10.
             text = self.voice.listen(
-                duration=getattr(self.voice, "ONE_TIME_LISTEN_SECONDS", 10))
+                duration=getattr(self.voice, "ONE_TIME_LISTEN_SECONDS", 20))
             
             # Play end sound
             wx.CallAfter(self._play_sound_effect, "end_of_request.wav")

@@ -70,9 +70,15 @@ def _clean_name(name):
 class VoiceControl:
     # Honey asked for more time to speak, 2026-11-23. These used to be
     # 5 seconds for a one-time command and only 3 seconds after "Samantha",
-    # which cut off slow speech and long show names.
-    ONE_TIME_LISTEN_SECONDS = 10
-    WAKE_WORD_COMMAND_SECONDS = 8
+    # which cut off slow speech and long show names. Raised again
+    # 2026-11-23 evening, when she said the voice feature was broken
+    # and asked for more time to speak and for it to hear her:
+    # 20 seconds for a one-time command, 15 seconds after "Samantha".
+    ONE_TIME_LISTEN_SECONDS = 20
+    WAKE_WORD_COMMAND_SECONDS = 15
+    # After the first words are heard, keep listening this long for
+    # more words, so a pause between words does not cut her off.
+    PAUSE_GRACE_SECONDS = 2.5
 
     def __init__(self, model_path="vosk-model-small-en-us-0.15"):
         """Initialize voice recognition"""
@@ -111,20 +117,43 @@ class VoiceControl:
 
                 import time
                 start_time = time.time()
+                # Honey, 2026-11-23: "make it so that it can hear me".
+                # Do not return on the very first words. Keep
+                # collecting words, and only stop after a short
+                # pause with no new words, or when time runs out.
+                # queue.get() has a timeout now, so a silent mic
+                # cannot block here forever past the duration.
+                heard = ""
+                last_heard_time = None
 
                 while time.time() - start_time < duration and self.is_listening:
-                    data = self.audio_queue.get()
+                    try:
+                        data = self.audio_queue.get(timeout=0.5)
+                    except queue.Empty:
+                        if heard and last_heard_time is not None and (
+                                time.time() - last_heard_time
+                                > self.PAUSE_GRACE_SECONDS):
+                            break
+                        continue
 
                     if self.recognizer.AcceptWaveform(data):
                         result = json.loads(self.recognizer.Result())
                         text = result.get('text', '').strip()
                         if text:
-                            return text
+                            heard = (heard + " " + text).strip() if heard else text
+                            last_heard_time = time.time()
+                    if heard and last_heard_time is not None and (
+                            time.time() - last_heard_time
+                            > self.PAUSE_GRACE_SECONDS):
+                        break
 
-                # Get final result
+                # Get final result, and add any trailing words to
+                # what was already heard.
                 result = json.loads(self.recognizer.FinalResult())
                 text = result.get('text', '').strip()
-                return text if text else None
+                if text and text not in heard:
+                    heard = (heard + " " + text).strip() if heard else text
+                return heard if heard else None
 
         except Exception as e:
             print(f"Voice recognition error: {e}")
@@ -145,7 +174,10 @@ class VoiceControl:
                                  channels=1, callback=self.audio_callback):
 
                 while self.wake_word_active:
-                    data = self.audio_queue.get()
+                    try:
+                        data = self.audio_queue.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
 
                     if self.recognizer.AcceptWaveform(data):
                         result = json.loads(self.recognizer.Result())
@@ -171,25 +203,47 @@ class VoiceControl:
 
                                 # Listen for command after wake word.
                                 # Honey asked for more time here too:
-                                # 8 seconds instead of 3.
+                                # 15 seconds instead of 8, and keep
+                                # collecting words through a pause,
+                                # so slow speech is heard in full.
                                 self.recognizer.Reset()
                                 import time
                                 start_time = time.time()
                                 command_text = ""
+                                last_heard_time = None
 
                                 while time.time() - start_time < self.WAKE_WORD_COMMAND_SECONDS and self.wake_word_active:
-                                    data = self.audio_queue.get()
+                                    try:
+                                        data = self.audio_queue.get(timeout=0.5)
+                                    except queue.Empty:
+                                        if command_text and last_heard_time is not None and (
+                                                time.time() - last_heard_time
+                                                > self.PAUSE_GRACE_SECONDS):
+                                            break
+                                        continue
 
                                     if self.recognizer.AcceptWaveform(data):
                                         result = json.loads(self.recognizer.Result())
-                                        command_text = result.get('text', '').strip()
-                                        if command_text:
-                                            break
+                                        text = result.get('text', '').strip()
+                                        if text:
+                                            command_text = (
+                                                (command_text + " " + text).strip()
+                                                if command_text else text)
+                                            last_heard_time = time.time()
+                                    if command_text and last_heard_time is not None and (
+                                            time.time() - last_heard_time
+                                            > self.PAUSE_GRACE_SECONDS):
+                                        break
 
                                 # Get final result if nothing yet
                                 if not command_text:
                                     result = json.loads(self.recognizer.FinalResult())
                                     command_text = result.get('text', '').strip()
+                                else:
+                                    result = json.loads(self.recognizer.FinalResult())
+                                    tail = result.get('text', '').strip()
+                                    if tail and tail not in command_text:
+                                        command_text = (command_text + " " + tail).strip()
 
                                 # Send command to callback
                                 if command_text:
