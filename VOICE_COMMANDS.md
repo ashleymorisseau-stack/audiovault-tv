@@ -10,8 +10,8 @@
 
 ### Mode 2: Wake Word Mode (Ctrl+Shift+W) - Recommended
 1. Press **Ctrl+Shift+W** to activate continuous listening
-2. Say **"Sam"** followed by your command
-3. Example: "Sam, play" or "Sam, next file"
+2. Say **"Samantha"** followed by your command
+3. Example: "Samantha, play" or "Samantha, next file"
 4. The app stays in listening mode until you press **Ctrl+Shift+W** again
 5. NVDA announces "Listening..." when wake word is detected
 
@@ -91,11 +91,11 @@
 
 YouTube downloads save as MP3 audio in your YouTube download folder. Saying "download it" always downloads from your last search — YouTube if that search was on YouTube, AudioVault if it was on AudioVault.
 
-Saying "Sam, play" in one breath works too — the words after "Sam" are kept as the command, instead of being thrown away.
+Saying "Samantha, play" in one breath works too — the words after "Samantha" are kept as the command, instead of being thrown away.
 
 ## Tips for Best Recognition
 
-- **Wake Word Mode**: Say "Sam" clearly, pause briefly, then give your command
+- **Wake Word Mode**: Say "Samantha" clearly, pause briefly, then give your command
 - Speak clearly and at normal volume
 - Use short, simple commands
 - If a command isn't recognized, try rephrasing it
@@ -111,18 +111,18 @@ Saying "Sam, play" in one breath works too — the words after "Sam" are kept as
 
 **Wake Word Mode:**
 1. Press Ctrl+Shift+W once to activate
-2. Say "Sam, play"
-3. Say "Sam, next file"
-4. Say "Sam, next channel"
+2. Say "Samantha, play"
+3. Say "Samantha, next file"
+4. Say "Samantha, next channel"
 5. Press Ctrl+Shift+W to deactivate when done
 
 ## Technical Details
 
 - **Recognition Engine**: Vosk (offline speech recognition)
 - **Model**: vosk-model-small-en-us-0.15
-- **Wake Word**: "Sam"
+- **Wake Word**: "Samantha"
 - **One-Time Listening Duration**: 10 seconds per activation
-- **Wake Word Command Duration**: 8 seconds after "Sam" is detected
+- **Wake Word Command Duration**: 8 seconds after "Samantha" is detected
 - **Language**: English (US)
 
 ## Coming Soon
