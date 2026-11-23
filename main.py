@@ -1249,7 +1249,7 @@ class PlayerFrame(wx.Frame):
                 self._on_vault_search(None, kind="shows")
             msg = f"Command recognized: {text}"
         elif command in ('download_shows', 'download_movies'):
-            # "Sam, download Close Enough" — search AudioVault for the
+            # "Samantha, download Close Enough" — search AudioVault for the
             # named show/movie and download the top result, with no
             # checklist to pick from by hand.
             kind = 'shows' if command == 'download_shows' else 'movies'
@@ -1265,7 +1265,7 @@ class PlayerFrame(wx.Frame):
                 self._on_yt_search(None)
             msg = f"Command recognized: {text}"
         elif command == 'download_youtube':
-            # "Sam, download Close Enough from YouTube" — search
+            # "Samantha, download Close Enough from YouTube" — search
             # YouTube for the named video and download the top
             # result in the background, with no checklist to pick
             # from by hand. Honey asked for this 2026-11-23.
@@ -1275,7 +1275,7 @@ class PlayerFrame(wx.Frame):
                 self._on_yt_search(None)
             msg = f"Command recognized: {text}"
         elif command == 'download_first':
-            # "Sam, download it" after a voice search: download the
+            # "Samantha, download it" after a voice search: download the
             # first result from that search. _vault_voice_download_first
             # speaks the result itself, so return here like
             # download_status does.
@@ -1329,13 +1329,13 @@ class PlayerFrame(wx.Frame):
         else:
             # Start wake word mode
             # Honey asked 2026-11-23: the start bell should ring on the
-            # call button, as soon as she calls Sam with Ctrl+Shift+W,
-            # not only after Sam is heard. So play it here, when wake
+            # call button, as soon as she calls Samantha with Ctrl+Shift+W,
+            # not only after Samantha is heard. So play it here, when wake
             # word mode starts. _wake_word_detected still plays it again
-            # when Sam is actually heard, so she knows Sam is listening.
+            # when Samantha is actually heard, so she knows Samantha is listening.
             self.wake_word_mode = True
             self._play_sound_effect("start_of_request.wav")
-            msg = "Wake word mode active. Say 'Sam' followed by a command."
+            msg = "Wake word mode active. Say 'Samantha' followed by a command."
             self.status_label.SetLabel(msg)
             speak(msg)
 
@@ -2129,7 +2129,7 @@ class PlayerFrame(wx.Frame):
 
     def _vault_voice_download_first(self):
         """Download the first result from the last voice/menu search.
-        Used by "Sam, download it" after Honey has heard the results.
+        Used by "Samantha, download it" after Honey has heard the results.
         If the last search was on YouTube, download that first
         YouTube result instead of an AudioVault one."""
         if getattr(self, "_last_search_source", "audiovault") == "youtube":
