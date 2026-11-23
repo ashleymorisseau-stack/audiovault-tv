@@ -35,7 +35,7 @@ Samantha learns your name only when you tell it to her by voice, and she remembe
 | "what is your name" | Samantha says "My name is Samantha" |
 | "hello" / "hi" | Samantha greets you by name, if she knows it |
 
-When she knows your name, Samantha greets you with it when she hears her wake word — "Hi Honey, I'm listening" — instead of just "I'm listening". You can also set or change your name from the menu, without voice.
+When she knows your name, Samantha greets you with it when she hears her wake word — "Hi Honey, I'm listening" — instead of just "I'm listening". Samantha does the greeting in her own recorded voice; NVDA does not greet you as well, so you only hear her. You can set your own name, including your real name, any time: tell Samantha by voice, for example "my name is Honey", or use Controls, then Set My Name, and type it in. Your name is saved on your own PC only, in config.ini, and is never pushed to GitHub.
 
 ## Samantha's Own Voice
 

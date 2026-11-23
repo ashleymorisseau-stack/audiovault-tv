@@ -1267,23 +1267,26 @@ class PlayerFrame(wx.Frame):
             msg = ("Okay, I've forgotten your name. Tell me again any "
                    "time, just say my name is Honey.")
         elif command == 'what_is_your_name':
-            # Honey, 2026-11-23: Samantha's own recorded voice, a
-            # little louder, friendly - "Hi, my name is Samantha.
-            # What is your name?" - plays first, then NVDA speaks
-            # the same words as a fallback.
+            # Honey, 2026-11-23 evening: Samantha greets in her
+            # own recorded voice, and NVDA does not repeat the
+            # greeting, so Honey only hears Samantha.
             self._play_sound_effect("samantha_greeting.wav")
             msg = "My name is Samantha. I'm your voice helper for Audio Vault TV."
+            self.status_label.SetLabel(msg)
+            return
         elif command == 'greet':
             name = self._get_user_name()
             if name:
                 # Samantha asks, in her own recorded voice, what
-                # Honey wants to watch.
+                # Honey wants to watch. NVDA does not repeat it.
                 self._play_sound_effect("samantha_what_to_watch.wav")
                 msg = f"Hi {name}! I'm Samantha. I'm listening."
             else:
                 self._play_sound_effect("samantha_greeting.wav")
                 msg = ("Hi! I'm Samantha. I'm listening. Tell me your "
                        "name any time, just say my name is Honey.")
+            self.status_label.SetLabel(msg)
+            return
         elif command == 'play_live_tv':
             # "Samantha, play live TV" - a favourite live channel
             # first, otherwise the first live channel.
@@ -1494,10 +1497,13 @@ class PlayerFrame(wx.Frame):
         self._play_sound_effect("samantha_what_to_watch.wav")
         # Samantha greets Honey by name, when she has told Samantha
         # her name by voice (see _parse_name_command / _set_user_name).
+        # Honey, 2026-11-23 evening: Samantha does the greeting,
+        # in her own recorded voice. NVDA does not greet her too,
+        # so she only hears Samantha, not a second greeting.
         name = self._get_user_name()
         msg = f"Hi {name}, I'm listening" if name else "I'm listening"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        return
     
     def _wake_word_command(self, text):
         """Handle command after wake word"""
