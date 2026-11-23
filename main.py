@@ -1182,8 +1182,9 @@ class PlayerFrame(wx.Frame):
     def _voice_listen_thread(self):
         """Thread for voice listening"""
         try:
-            # Listen for 5 seconds
-            text = self.voice.listen(duration=5)
+            # Honey asked for more time to speak: 10 seconds, up from 5.
+            text = self.voice.listen(
+                duration=getattr(self.voice, "ONE_TIME_LISTEN_SECONDS", 10))
             
             # Play end sound
             wx.CallAfter(self._play_sound_effect, "end_of_request.wav")
@@ -1247,6 +1248,26 @@ class PlayerFrame(wx.Frame):
             else:
                 self._on_vault_search(None, kind="shows")
             msg = f"Command recognized: {text}"
+        elif command in ('download_shows', 'download_movies'):
+            # "Sam, download Close Enough" — search AudioVault for the
+            # named show/movie and download the top result, with no
+            # checklist to pick from by hand.
+            kind = 'shows' if command == 'download_shows' else 'movies'
+            if query:
+                self._vault_voice_download(query, kind)
+            else:
+                self._on_vault_recents(None, kind="movies")
+            msg = f"Command recognized: {text}"
+        elif command == 'download_first':
+            # "Sam, download it" after a voice search: download the
+            # first result from that search. _vault_voice_download_first
+            # speaks the result itself, so return here like
+            # download_status does.
+            self._vault_voice_download_first()
+            return
+        elif command == 'cancel_downloads':
+            self._on_cancel_downloads()
+            return
         elif command == 'download_status':
             # _on_download_status already speaks the status; return here
             # so the generic "Command recognized" message does not talk
@@ -2053,6 +2074,74 @@ class PlayerFrame(wx.Frame):
         thread = threading.Thread(target=self._vault_search_thread, args=(query, kind), daemon=True)
         thread.start()
 
+    def _vault_voice_download(self, query, kind):
+        """Voice download: search AudioVault for a named show/movie and
+        download the top result in the background, with no checklist
+        to pick from by hand. Honey asked for this 2026-11-23."""
+        if not self._vault_ensure_login():
+            return
+        msg = f"Searching AudioVault for {query} to download..."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        thread = threading.Thread(
+            target=self._vault_voice_download_thread, args=(query, kind),
+            daemon=True)
+        thread.start()
+
+    def _vault_voice_download_thread(self, query, kind):
+        """Background thread for a voice download search"""
+        try:
+            results = av.search(query, kind=kind)
+            wx.CallAfter(self._vault_voice_download_results, results, kind, query)
+        except Exception as e:
+            wx.CallAfter(self._vault_error, f"Search error: {e}")
+
+    def _vault_voice_download_results(self, results, kind, query):
+        """Queue the top AudioVault result for a voice download"""
+        if not results:
+            msg = f"I could not find {query} on AudioVault."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        self._queue_voice_download(results[0], kind)
+
+    def _vault_voice_download_first(self):
+        """Download the first result from the last voice/menu search.
+        Used by "Sam, download it" after Honey has heard the results."""
+        results = getattr(self, "_last_search_results", None) or []
+        if not results:
+            msg = "There is no search to download from yet. Search for a show first."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        kind = getattr(self, "_last_search_kind", "shows")
+        self._queue_voice_download(results[0], kind)
+
+    def _queue_voice_download(self, result, kind):
+        """Queue one AudioVault result for a background download, with
+        no pop-up. Puts it in its own subfolder, named after the show,
+        so a channel can be offered from it afterwards, as with a
+        single download picked from the results list."""
+        av_id, name, link = result
+        dest = av.load_download_dir(kind=kind)
+        subfolder = av.sanitize_filename(self._suggest_channel_name(name))
+        if subfolder:
+            dest = os.path.join(dest, subfolder)
+            self.download_subfolder = subfolder
+        else:
+            self.download_subfolder = None
+        os.makedirs(dest, exist_ok=True)
+        self.download_queue = [(name, link)]
+        self.download_create_channel = False
+        self.download_dest = dest
+        self.download_queue_index = 0
+        self._bg_cancel_requested = False
+        self._bg_vault_percent = 0
+        msg = f"Downloading {name} in the background."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self._vault_download_next()
+
     def _vault_search_thread(self, query, kind):
         """Background thread for search"""
         try:
@@ -2139,14 +2228,22 @@ class PlayerFrame(wx.Frame):
 
     def _vault_show_results(self, results, kind):
         """Show search/recent results and allow multiple downloads"""
+        # Remember these for a voice "download it" afterwards.
+        self._last_search_results = list(results) if results else []
+        self._last_search_kind = kind
         if not results:
             msg = "No results found"
             self.status_label.SetLabel(msg)
             speak(msg)
             return
-        
+
         items = [f"{name} ({av_id})" for av_id, name, link in results]
-        msg = f"Found {len(items)} results"
+        # Speak the first few names, so Honey can hear them without
+        # navigating the checklist, then say "download it" for the
+        # first one, or pick from the list as before.
+        spoken_names = "; ".join(
+            f"{i + 1}. {name}" for i, (_, name, _) in enumerate(results[:3]))
+        msg = f"Found {len(items)} results. {spoken_names}."
         speak(msg)
         
         # Custom dialog with CheckListBox for NVDA accessibility
