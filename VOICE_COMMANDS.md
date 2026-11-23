@@ -65,7 +65,9 @@
 ### Search and Download on AudioVault.net
 | Say This | Action |
 |----------|--------|
+| "search for Friends the sitcom new description" | Search AudioVault.net for Friends, and pick the exact Friends sitcom, Season 1, US New Description — not the first title containing the word, like "A Killer Among Friends" |
 | "search for a TV show Close Enough" | Search AudioVault.net for that TV show, and speak the first few results |
+| "download Friends" | Search AudioVault and download the exact Friends show, Season 1 New Description, in the background — this exact-match pick works for every show you mention, not just Friends |
 | "find a TV show Chicago Party Aunt" | Search AudioVault.net for that TV show |
 | "search for a movie Ghostbusters" | Search AudioVault.net for that movie |
 | "search audiovault for Close Enough" | Search AudioVault.net for that show |
