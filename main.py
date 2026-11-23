@@ -1328,11 +1328,17 @@ class PlayerFrame(wx.Frame):
             speak(msg)
         else:
             # Start wake word mode
+            # Honey asked 2026-11-23: the start bell should ring on the
+            # call button, as soon as she calls Sam with Ctrl+Shift+W,
+            # not only after Sam is heard. So play it here, when wake
+            # word mode starts. _wake_word_detected still plays it again
+            # when Sam is actually heard, so she knows Sam is listening.
             self.wake_word_mode = True
+            self._play_sound_effect("start_of_request.wav")
             msg = "Wake word mode active. Say 'Sam' followed by a command."
             self.status_label.SetLabel(msg)
             speak(msg)
-            
+
             self.wake_word_thread = threading.Thread(target=self._wake_word_listen_thread, daemon=True)
             self.wake_word_thread.start()
     
