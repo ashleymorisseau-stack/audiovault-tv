@@ -50,6 +50,23 @@ def _kind_from_text(text):
     return "shows"
 
 
+def _clean_name(name):
+    """Tidy a spoken name into a short display name, or '' if unusable."""
+    if not name:
+        return ""
+    name = name.lower().strip()
+    name = re.sub(r"\s+please\s*$", "", name)
+    name = name.strip(" .,!")
+    # A name is one or two words; anything longer is probably a
+    # sentence Vosk misheard, not a name.
+    words = [w for w in re.split(r"\s+", name) if w]
+    words = [w for w in words if re.fullmatch(r"[a-z][a-z'\-]*", w)]
+    if not words:
+        return ""
+    words = words[:2]
+    return " ".join(w.capitalize() for w in words)
+
+
 class VoiceControl:
     # Honey asked for more time to speak, 2026-11-23. These used to be
     # 5 seconds for a one-time command and only 3 seconds after "Samantha",
@@ -201,6 +218,32 @@ class VoiceControl:
 
         text = text.lower().strip()
 
+        # --- Name: Honey asked 2026-11-23 that Samantha learn her
+        # name when she tells it to her, and remember it. Checked
+        # before search/download/play, so "my name is Honey" is not
+        # swallowed by another command.
+        name_command = self._parse_name_command(text)
+        if name_command is not None:
+            return name_command
+
+        # --- Live TV: Honey asked 2026-11-23 that Samantha also
+        # play live channels, like Game Show Network and other
+        # channels. Checked before YouTube/AudioVault search and
+        # before generic "play", so "play Game Show Network live"
+        # is not swallowed by play/pause or by a show search.
+        live = self._parse_live_tv(text)
+        if live is not None:
+            return live
+
+        # --- Delete a channel's downloads: Honey asked 2026-11-23
+        # to get rid of the downloads for "A Killer Among Friends"
+        # (the wrong Friends download). Checked before the generic
+        # download handlers, so "delete ... downloads" is not
+        # treated as a download request.
+        delete_dl = self._parse_delete_downloads(text)
+        if delete_dl is not None:
+            return delete_dl
+
         # Download status / cancel: check before the generic "download".
         if 'download status' in text or 'downloads status' in text or 'what is downloading' in text:
             return 'download_status'
@@ -267,6 +310,119 @@ class VoiceControl:
         if 'download' in text:
             return 'download'
 
+        return None
+
+    def _parse_name_command(self, text):
+        """Name commands. Returns ('set_name', name), 'what_is_my_name',
+        'forget_name', 'what_is_your_name' or 'greet', or None.
+
+        Samantha learns the name only when Honey tells it to her, by
+        voice — "my name is Honey" / "call me Honey" — and main.py
+        saves it with _set_user_name, so she remembers it after a
+        restart. She never guesses a name she has not been told.
+        """
+        # In one-time mode the whole utterance can start with
+        # "Samantha, ..."; in wake-word mode it is already stripped.
+        text = re.sub(r"^(?:hey\s+)?samantha[,\s]+", "", text.strip())
+
+        if re.search(r"\bforget my name\b|\bforget what my name is\b",
+                     text):
+            return 'forget_name'
+        if re.search(r"\bwhat(?:'s| is) my name\b"
+                     r"|\bdo you know my name\b"
+                     r"|\bwho am i\b"
+                     r"|\bwhat do you call me\b", text):
+            return 'what_is_my_name'
+        if re.search(r"\bwhat(?:'s| is) your name\b|\bwho are you\b",
+                     text):
+            return 'what_is_your_name'
+        if re.search(r"^(?:hello|hi|hey|good morning|good afternoon"
+                     r"|good evening)\b", text):
+            return 'greet'
+
+        match = re.search(
+            r"(?:my name is|my name's|call me|remember my name is"
+            r"|remember my name's|please call me|you can call me)"
+            r"\s+([a-z][a-z' \-]{0,30})",
+            text)
+        if match:
+            name = _clean_name(match.group(1))
+            if name and name.lower() not in ("samantha", "you", "me"):
+                return ('set_name', name)
+        return None
+
+    def _parse_live_tv(self, text):
+        """Return a live-TV command, or None.
+
+        'play_live_tv' | ('play_live_channel', name) |
+        ('search_live_channels', name) | 'stop_live_tv'
+        """
+        if 'live' not in text and 'game show network' not in text:
+            return None
+        if re.search(r"\bstop\s+(?:the\s+)?live\s+(?:tv|television|channel)\b", text):
+            return 'stop_live_tv'
+        # "search live channels for Game Show Network"
+        m = re.search(r"(?:search|find)\s+(?:live\s+)?(?:tv\s+)?channels?\s+(?:for\s+)?(.+)", text)
+        if m and 'live' in text:
+            q = _clean_query(m.group(1))
+            q = re.sub(r"\s+(?:live|channel|channels|tv|television)\s*$", "", q)
+            if q:
+                return ('search_live_channels', q)
+            return 'search_live_channels'
+        # "play Game Show Network live" / "play live channel Game
+        # Show Network" / "watch Game Show Network live"
+        m = re.search(
+            r"(?:play|watch|tune\s+(?:in\s+)?to)\s+(?:a\s+|an\s+|the\s+)?"
+            r"(?:live\s+)?(?:tv\s+)?(?:channel\s+)?(.+?)\s+live\b", text)
+        if m:
+            q = _clean_query(m.group(1))
+            if q:
+                return ('play_live_channel', q)
+        m = re.search(
+            r"(?:play|watch|tune\s+(?:in\s+)?to)\s+(?:a\s+|an\s+|the\s+)?"
+            r"live\s+(?:tv\s+|television\s+)?(?:channel\s+)?(.+)", text)
+        if m:
+            q = _clean_query(m.group(1))
+            if q in ("tv", "television", "channel", "channels"):
+                return 'play_live_tv'
+            if q:
+                return ('play_live_channel', q)
+            return 'play_live_tv'
+        if re.search(r"\bplay\s+(?:the\s+)?live\s+(?:tv|television|channels?)\b", text):
+            return 'play_live_tv'
+        if 'game show network' in text and re.search(r"\b(?:play|watch)\b", text):
+            return ('play_live_channel', 'game show network')
+        return None
+
+    def _parse_delete_downloads(self, text):
+        """Return ('delete_channel_downloads', name),
+        'delete_channel_downloads' (current channel), or None.
+
+        "delete A Killer Among Friends downloads" -> the named
+        channel. Vosk may hear "amongst" for "among", so normalise
+        it here; main.py matches "killer among friends" either way.
+        """
+        if not re.search(r"\b(?:delete|remove|get rid of)\b", text):
+            return None
+        if 'download' not in text and 'channel' not in text:
+            return None
+        text = text.replace('amongst', 'among')
+        m = re.search(
+            r"(?:delete|remove|get rid of)\s+(?:the\s+)?(.+?)\s+downloads?\b", text)
+        if m:
+            q = _clean_query(m.group(1))
+            q = re.sub(r"^(?:the\s+)?channel\s+", "", q)
+            if q and q not in ('them', 'it', 'those', 'these'):
+                return ('delete_channel_downloads', q)
+            return 'delete_channel_downloads'
+        m = re.search(
+            r"(?:delete|remove|get rid of)\s+(?:the\s+)?downloads?\s+(?:for|of)\s+(?:the\s+)?(.+)", text)
+        if m:
+            q = _clean_query(m.group(1))
+            if q:
+                return ('delete_channel_downloads', q)
+        if re.search(r"\bdelete\s+(?:the\s+)?channel\b", text):
+            return 'delete_channel_downloads'
         return None
 
     def _parse_youtube_search(self, text):
