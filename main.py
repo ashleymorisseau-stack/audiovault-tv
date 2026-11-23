@@ -1258,6 +1258,22 @@ class PlayerFrame(wx.Frame):
             else:
                 self._on_vault_recents(None, kind="movies")
             msg = f"Command recognized: {text}"
+        elif command == 'search_youtube':
+            if query:
+                self._yt_voice_search(query)
+            else:
+                self._on_yt_search(None)
+            msg = f"Command recognized: {text}"
+        elif command == 'download_youtube':
+            # "Sam, download Close Enough from YouTube" — search
+            # YouTube for the named video and download the top
+            # result in the background, with no checklist to pick
+            # from by hand. Honey asked for this 2026-11-23.
+            if query:
+                self._yt_voice_download(query)
+            else:
+                self._on_yt_search(None)
+            msg = f"Command recognized: {text}"
         elif command == 'download_first':
             # "Sam, download it" after a voice search: download the
             # first result from that search. _vault_voice_download_first
@@ -2107,7 +2123,14 @@ class PlayerFrame(wx.Frame):
 
     def _vault_voice_download_first(self):
         """Download the first result from the last voice/menu search.
-        Used by "Sam, download it" after Honey has heard the results."""
+        Used by "Sam, download it" after Honey has heard the results.
+        If the last search was on YouTube, download that first
+        YouTube result instead of an AudioVault one."""
+        if getattr(self, "_last_search_source", "audiovault") == "youtube":
+            yt_results = getattr(self, "_last_yt_search_results", None) or []
+            if yt_results:
+                self._queue_yt_voice_download(yt_results[0])
+                return
         results = getattr(self, "_last_search_results", None) or []
         if not results:
             msg = "There is no search to download from yet. Search for a show first."
@@ -2116,6 +2139,108 @@ class PlayerFrame(wx.Frame):
             return
         kind = getattr(self, "_last_search_kind", "shows")
         self._queue_voice_download(results[0], kind)
+
+    # ---- YouTube voice search and download ----
+    # Mirrors the AudioVault voice flow above: search by voice, hear
+    # the first few titles, then "download it" for the first one, or
+    # "download X from YouTube" to download the top result straight
+    # away. Honey asked for this 2026-11-23.
+
+    def _yt_voice_search(self, query):
+        """Search YouTube directly from a voice command."""
+        if not YT_AVAILABLE:
+            msg = "YouTube is not available right now."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        msg = f"Searching YouTube for {query}..."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        thread = threading.Thread(
+            target=self._yt_voice_search_thread, args=(query,), daemon=True)
+        thread.start()
+
+    def _yt_voice_search_thread(self, query):
+        """Background thread for a voice YouTube search."""
+        try:
+            results = yt.search(query)
+            wx.CallAfter(self._yt_voice_search_results, results, query)
+        except Exception as e:
+            wx.CallAfter(self._yt_error_dialog, f"YouTube search error:\n\n{e}")
+
+    def _yt_voice_search_results(self, results, query):
+        """Remember a voice YouTube search, then show the results."""
+        if not results:
+            msg = f"I could not find {query} on YouTube."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        self._last_yt_search_results = list(results)
+        self._last_search_source = "youtube"
+        # _yt_show_results speaks the first few titles and shows the
+        # checklist, so Honey can pick from the list or say
+        # "download it" for the first one.
+        self._yt_show_results(results)
+
+    def _yt_voice_download(self, query):
+        """Voice download: search YouTube for a named video and
+        download the top result in the background, with no checklist
+        to pick from by hand."""
+        if not YT_AVAILABLE:
+            msg = "YouTube is not available right now."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        msg = f"Searching YouTube for {query} to download..."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        thread = threading.Thread(
+            target=self._yt_voice_download_thread, args=(query,),
+            daemon=True)
+        thread.start()
+
+    def _yt_voice_download_thread(self, query):
+        """Background thread for a voice YouTube download search."""
+        try:
+            results = yt.search(query)
+            wx.CallAfter(self._yt_voice_download_results, results, query)
+        except Exception as e:
+            wx.CallAfter(self._yt_error_dialog, f"YouTube search error:\n\n{e}")
+
+    def _yt_voice_download_results(self, results, query):
+        """Queue the top YouTube result for a voice download."""
+        if not results:
+            msg = f"I could not find {query} on YouTube."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        self._queue_yt_voice_download(results[0])
+
+    def _queue_yt_voice_download(self, result):
+        """Queue one YouTube result for a background download, with
+        no pop-up. The existing YouTube queue and progress reporting
+        are reused, so Download Status and Cancel Downloads work
+        for it just as they do for a menu download."""
+        title = result.get("title", "Unknown")
+        url = result.get("url", "")
+        if not url:
+            msg = f"I could not download {title} from YouTube."
+            self.status_label.SetLabel(msg)
+            speak(msg)
+            return
+        dest = yt.load_download_dir()
+        os.makedirs(dest, exist_ok=True)
+        self._yt_download_queue = [(title, url)]
+        self._yt_download_dest = dest
+        self._yt_download_idx = 0
+        self._yt_download_subfolder = None
+        self._bg_cancel_requested = False
+        self._yt_cancel_requested = False
+        self._bg_yt_percent = 0
+        msg = f"Downloading {title} from YouTube in the background."
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        self._yt_download_next()
 
     def _queue_voice_download(self, result, kind):
         """Queue one AudioVault result for a background download, with
@@ -2231,6 +2356,7 @@ class PlayerFrame(wx.Frame):
         # Remember these for a voice "download it" afterwards.
         self._last_search_results = list(results) if results else []
         self._last_search_kind = kind
+        self._last_search_source = "audiovault"
         if not results:
             msg = "No results found"
             self.status_label.SetLabel(msg)
@@ -3030,7 +3156,13 @@ class PlayerFrame(wx.Frame):
             return
 
         items = [f"{r['title']} [{r['duration']}] - {r['channel']}" for r in results]
-        speak(f"Found {len(items)} results")
+        # Remember these for a voice "download it" afterwards, and
+        # speak the first few titles, as the AudioVault results do.
+        self._last_yt_search_results = list(results)
+        self._last_search_source = "youtube"
+        spoken_names = "; ".join(
+            f"{i + 1}. {r['title']}" for i, r in enumerate(results[:3]))
+        speak(f"Found {len(items)} results. {spoken_names}.")
 
         dlg = wx.Dialog(self, title="YouTube Results", size=(600, 400))
         panel = wx.Panel(dlg)

@@ -76,6 +76,21 @@
 | "download status" | Hear what is downloading in the background |
 | "cancel downloads" | Stop any downloads running in the background |
 
+### Search and Download on YouTube
+| Say This | Action |
+|----------|--------|
+| "search YouTube for Close Enough" | Search YouTube for that show or video, and speak the first few results |
+| "search for Close Enough on YouTube" | Search YouTube for that show or video |
+| "find a movie Ghostbusters on YouTube" | Search YouTube for that movie |
+| "download Close Enough from YouTube" | Search YouTube and download the top result in the background, with no list to pick from |
+| "download from YouTube Close Enough" | Download the top YouTube result for that show |
+| "search and download Close Enough on YouTube" | Search YouTube and download the top result |
+| "download it" | After a YouTube search, download the first result from that search |
+| "download status" | Hear what is downloading in the background |
+| "cancel downloads" | Stop any downloads running in the background |
+
+YouTube downloads save as MP3 audio in your YouTube download folder. Saying "download it" always downloads from your last search — YouTube if that search was on YouTube, AudioVault if it was on AudioVault.
+
 Saying "Sam, play" in one breath works too — the words after "Sam" are kept as the command, instead of being thrown away.
 
 ## Tips for Best Recognition
@@ -84,7 +99,7 @@ Saying "Sam, play" in one breath works too — the words after "Sam" are kept as
 - Speak clearly and at normal volume
 - Use short, simple commands
 - If a command isn't recognized, try rephrasing it
-- Playback commands work offline - no internet required. Searching and downloading on AudioVault.net need internet.
+- Playback commands work offline - no internet required. Searching and downloading on AudioVault.net and YouTube need internet.
 - Wake word mode runs continuously in the background
 
 ## Examples

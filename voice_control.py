@@ -16,6 +16,8 @@ def _clean_query(query):
     query = re.sub(r"\s+and\s+download(?:\s+it|\s+that|\s+this)?\s*$", "", query)
     # Drop a trailing "on audiovault / on audio vault / from audiovault".
     query = re.sub(r"\s+(?:on|from)\s+(?:audio\s*?vault|audiovault)\s*$", "", query)
+    # Drop a trailing "on youtube / from youtube".
+    query = re.sub(r"\s+(?:on|from)\s+(?:you\s*?tube|youtube)\s*$", "", query)
     query = re.sub(r"\s+please\s*$", "", query)
     query = query.strip(" .,")
     # Drop a leading "for / a / an / the" left over from a split.
@@ -193,6 +195,18 @@ class VoiceControl:
                 r"\bdownload\s+(?:it|that|this|the first(?: one| result)?)\b", text):
             return 'download_first'
 
+        # --- YouTube search and download ---
+        # Checked before AudioVault, so "search for X on YouTube" is
+        # not swallowed by the plain AudioVault "search for X" pattern.
+        # Honey asked for the same voice search and download for
+        # YouTube as for AudioVault, 2026-11-23.
+        yt_download = self._parse_youtube_download(text)
+        if yt_download is not None:
+            return yt_download
+        yt_search = self._parse_youtube_search(text)
+        if yt_search is not None:
+            return yt_search
+
         # --- AudioVault search and download ---
         # These are checked before play/pause/navigation, so a show name
         # containing one of those words (for example "play") does not
@@ -235,6 +249,76 @@ class VoiceControl:
         if 'download' in text:
             return 'download'
 
+        return None
+
+    def _parse_youtube_search(self, text):
+        """Return ('search_youtube', query) or 'search_youtube', or
+        None when this is not a YouTube search."""
+        if "youtube" not in text and "you tube" not in text:
+            return None
+        text = text.replace("you tube", "youtube")
+
+        patterns = [
+            # "search for a TV show Close Enough on YouTube"
+            r"(?:search|find|look for|look up)\s+(?:for\s+)?(?:a\s+|an\s+|the\s+)?"
+            r"(.+?)\s+(?:on|from)\s+youtube\b",
+            # "search YouTube for Close Enough" / "find YouTube Close Enough"
+            r"(?:search|find)\s+youtube\s+(?:for\s+)?(.+)",
+            # "search on YouTube for Close Enough"
+            r"(?:search|find)\s+(?:on\s+)?youtube\s+(?:for\s+)?(.+)",
+            # "search Close Enough on YouTube" is caught by the first
+            # pattern; "search Close Enough YouTube" by this one.
+            r"(?:search|find)\s+(?:for\s+)?(.+?)\s+youtube\s*$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                query = _clean_query(match.group(1))
+                query = re.sub(
+                    r"^(?:tv\s+shows?|shows?|movies?|films?|videos?|songs?|music)\s+",
+                    "", query)
+                if query and query not in ("youtube",):
+                    return ("search_youtube", query)
+                return "search_youtube"
+
+        if re.search(r"\b(?:search|find)\s+youtube\b", text):
+            return "search_youtube"
+        return None
+
+    def _parse_youtube_download(self, text):
+        """Return ('download_youtube', query) when Honey names
+        something to download from YouTube, or None otherwise."""
+        if "download" not in text:
+            return None
+        if "youtube" not in text and "you tube" not in text:
+            return None
+        text = text.replace("you tube", "youtube")
+
+        patterns = [
+            # "search and download Close Enough on YouTube"
+            r"(?:search|find)\s+(?:for\s+)?(?:a\s+|an\s+|the\s+)?"
+            r"(.+?)\s+and\s+download(?:\s+it|\s+that|\s+this)?\s*"
+            r"(?:(?:on|from)\s+youtube)?\s*$",
+            # "download from YouTube Close Enough"
+            r"download\s+(?:from\s+)?youtube\s+(?:for\s+)?(.+)",
+            # "download YouTube Close Enough"
+            r"download\s+youtube\s+(?:a\s+|an\s+|the\s+)?(.+)",
+            # "download Close Enough from YouTube"
+            r"download\s+(?:a\s+|an\s+|the\s+)?(.+?)\s+(?:on|from)\s+youtube\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                query = _clean_query(match.group(1))
+                # "search youtube for X and download it" leaves a
+                # leading "youtube for" in the captured name.
+                query = re.sub(r"^youtube\s+(?:for\s+)?", "", query)
+                query = re.sub(
+                    r"^(?:tv\s+shows?|shows?|movies?|films?|videos?|songs?|music)\s+",
+                    "", query)
+                if query and query not in ("status", "it", "that", "this",
+                                           "youtube"):
+                    return ("download_youtube", query)
         return None
 
     def _parse_search(self, text):
