@@ -310,10 +310,20 @@ class VoiceControl:
                     "i'm doing good", "i am doing good"):
             return 'feeling_good'
 
-        # --- List channels: Ashley, 2026-11-26. "List all the
-        # channels that I have" / "what channels do I have".
-        # Checked before live-TV search, so "list channels"
-        # is not treated as a live-channel search.
+        # --- List shows: Ashley, 2026-11-26. "What are my
+        # options?" / "tell me the list of shows I have so I
+        # can choose a channel". Checked before live-TV search
+        # and before the TV guide, so "what shows do I have"
+        # is not treated as a guide or a show search.
+        if re.search(
+                r"\bwhat are my (?:options|choices)\b"
+                r"|\bwhat can i (?:watch|choose)\b"
+                r"|\bwhat shows? (?:do i have|have i got|are there)"
+                r"|\blist (?:all )?(?:the )?shows?\b"
+                r"|\btell me (?:the )?(?:list of )?(?:shows?|options)\b"
+                r"|\bshow me (?:the )?(?:shows?|options)\b"
+                r"|\bwhat are my shows?\b", text):
+            return 'list_shows'
         if re.search(
                 r"\b(?:list|show|tell me|read|name)\b.*\bchannels?\b",
                 text) and ("list" in text or "what" in text
@@ -415,6 +425,24 @@ class VoiceControl:
         search = self._parse_search(text)
         if search is not None:
             return search
+
+        # --- Play a named channel/show: Ashley, 2026-11-26.
+        # After Samantha reads the list of shows, Ashley picks
+        # one by name: "play Friends", "watch Classic Doctor
+        # Who", "play the Frasier channel". Checked before the
+        # generic play/pause below, so "play Friends" switches
+        # to that channel instead of just toggling play/pause.
+        # Live TV is already handled above.
+        m = re.search(
+            r"^(?:play|watch|switch to|go to)\s+(?:the\s+)?"
+            r"(.+?)(?:\s+channel)?\s*$", text)
+        if m:
+            name = m.group(1).strip()
+            if name and name not in (
+                    "it", "that", "this", "live tv",
+                    "live television", "tv", "television",
+                    "music", "something", "the"):
+                return ('play_channel', name)
 
         # Play/Pause commands
         if any(word in text for word in ['play', 'pause', 'resume', 'stop']):

@@ -50,13 +50,29 @@ Samantha now speaks in her own recorded voice, not just NVDA. Her voice is frien
 Samantha asks "Hi Sweetie! How are you doing? What do you want to watch?" in her own voice when Audio Vault TV opens, and when she hears her wake word. Answer her by voice: press **Ctrl+Shift+B** and say "I'm good", or say "Samantha, I'm good" in wake-word mode.
 
 - Samantha answers in her own recorded voice: "That's wonderful! I'm so glad you're doing good. What do you want to watch?" Her voice file is sounds/samantha_glad_youre_good.wav. NVDA does not repeat it.
-- Then, without you having to ask, she reads the list of channels you have, so you can tell her which one you want to watch.
+- Then, without you having to ask, she reads the list of shows you have, so you can tell her which one you want to watch.
 - Then she tells you what comes up next in the TV guide — including marathons, for example "A marathon of Classic Doctor Who is coming up next", or a marathon of Two and a Half Men, Friends, or Frasier, on whatever channels you have.
 - Then tell her the channel you want, for example "play Friends" or "play Classic Doctor Who", and she will take you there.
 
 You can also ask for the list on its own, any time: "Samantha, list all the channels I have" or "what channels do I have".
 
 The channel names, and the show names in the guide, change as you add channels, so they are read in the app's usual speaking voice — Samantha's voice is recordings and cannot read new names she never recorded — the same pattern as the TV guide below.
+
+## List of Shows — "What Are My Options?"
+
+Ask Samantha, by voice, "What are my options?" or "tell me the list of shows I have", and she reads out all the shows you have — Friends, Classic Doctor Who, Two and a Half Men, Frasier, and so on — so you can choose a channel by the show you want. Then tell her the show, for example "play Friends", and she will take you there. The show names change as you add shows, so they are read in the app's usual speaking voice, the same pattern as the TV guide.
+
+| Say This | Action |
+|----------|--------|
+| "what are my options" | Samantha reads the list of shows you have |
+| "tell me the list of shows I have" | Same as above |
+| "what shows do I have" | Same as above |
+| "list all the shows" | Same as above |
+| "list all the channels I have" | Samantha reads the list of channels you have |
+
+## Loading Is Silent — Samantha Greets You in Her Voice
+
+Audio Vault TV does not print "Loading ..." lines any more, because NVDA reads the terminal out loud and was saying every loading line while the app opened. Loading is silent now. The only thing you hear is Samantha, in her own voice, saying "Hi Sweetie! How are you doing? What do you want to watch?" when the app is ready.
 
 ## Live TV by Voice
 

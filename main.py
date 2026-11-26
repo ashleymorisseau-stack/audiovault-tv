@@ -1,9 +1,11 @@
 import time
-print(f"[{time.strftime('%H:%M:%S')}] Starting AudioVault TV...")
-
-print("Loading wx...", flush=True)
+# Ashley, 2026-11-26: NO print() at startup. NVDA reads the
+# terminal out loud, so every "Loading ..." line was spoken
+# by NVDA while Audio Vault TV opened, and she does not want
+# that. Loading is silent now — Samantha says hello in her
+# own voice when the app is ready, in _show_greeting_dialog,
+# and that is the only loading signal she hears.
 import wx
-print("Loading standard libs...", flush=True)
 import os
 import json
 import threading
@@ -11,37 +13,25 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-print("Loading audio player...", flush=True)
 from audio_player import AudioPlayer
-print("Loading playlist manager...", flush=True)
 from playlist_manager import PlaylistManager
-print("Loading channel manager...", flush=True)
 from channel_manager import ChannelManager
-print("Loading voice control...", flush=True)
 from voice_control import VoiceControl
-print("Loading logger...", flush=True)
 from player_logger import PlayerLogger
-print("Loading AudioVault client...", flush=True)
 import audiovault_client as av
-print("Loading YouTube client...", flush=True)
 try:
     import youtube_client as yt
     YT_AVAILABLE = True
 except ImportError:
     yt = None
     YT_AVAILABLE = False
-    print("  YouTube client not available")
 
-print("Loading Live TV client...", flush=True)
 try:
     import livetv_client as livetv
     LIVETV_AVAILABLE = True
 except ImportError:
     livetv = None
     LIVETV_AVAILABLE = False
-    print("  Live TV client not available")
-
-print(f"[{time.strftime('%H:%M:%S')}] All modules loaded.", flush=True)
 
 # NVDA integration
 nvda = None
@@ -1391,6 +1381,13 @@ class PlayerFrame(wx.Frame):
             # them out, without opening the channel picker.
             self._speak_channel_list()
             return
+        elif command == 'list_shows':
+            # Ashley, 2026-11-26: "What are my options?" /
+            # "tell me the list of shows I have so I can
+            # choose a channel". Samantha reads the shows,
+            # so Ashley can pick one by name.
+            self._speak_show_list()
+            return
         elif command == 'play_live_tv':
             # "Samantha, play live TV" - a favourite live channel
             # first, otherwise the first live channel.
@@ -1425,6 +1422,28 @@ class PlayerFrame(wx.Frame):
             # Friends downloads" - deletes right away when she
             # tells it to, then speaks what was removed.
             self._delete_channel_downloads(query, confirm=False)
+            return
+        elif command == 'play_channel':
+            # Ashley, 2026-11-26: after Samantha reads the list
+            # of shows, Ashley picks one by name — "play
+            # Friends", "watch Classic Doctor Who". _find_local_
+            # channel matches exact, then starts-with, then
+            # contains, so "friends" finds the Friends channel.
+            # If nothing matches, Samantha says so instead of
+            # just toggling play/pause.
+            found = self._find_local_channel(query)
+            if found:
+                self._switch_to_channel(found)
+                if self.playlist.get_current():
+                    self.player.play()
+                    msg = f"Now playing: {found}"
+                else:
+                    msg = f"Switched to {found}, but there is nothing to play."
+            else:
+                msg = (f"I couldn't find a channel called {query}, "
+                       "so I didn't change anything.")
+            self.status_label.SetLabel(msg)
+            speak(msg)
             return
         elif command == 'play_pause':
             self._toggle_play_pause()
@@ -4385,9 +4404,44 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
 
+    def _speak_show_list(self):
+        """Read out all the shows Ashley has, so she can choose
+        a channel.
+
+        Ashley, 2026-11-26: "tell me the list of shows that
+        I have so that I can choose a channel" / "What are
+        my options?" The shows are the distinct show names
+        in all her channels — Friends, Classic Doctor Who,
+        Two and a Half Men, Frasier, and so on — not just
+        channel names, because a channel can hold a show
+        under a slightly different name. The names change
+        as she adds shows, so they are read in the app's
+        usual speaking voice, the same pattern as the TV
+        guide. After the list, she can say the show she
+        wants, for example "play Friends".
+        """
+        seen = {}
+        for name in self.channels.get_channel_list():
+            for fn in self._channel_file_names(name):
+                base = self._show_base(fn)
+                if not base:
+                    continue
+                display = str(fn).split(" - ")[0].strip()
+                if not display:
+                    continue
+                seen[base] = display
+        shows = [seen[k] for k in sorted(seen)]
+        if not shows:
+            msg = "No shows available. Press Ctrl+T to create a channel."
+        else:
+            msg = (f"Here are the shows you have: {', '.join(shows)}. "
+                   "Tell me which one you want to watch.")
+        self.status_label.SetLabel(msg)
+        speak(msg)
+
     def _speak_channels_and_guide(self):
-        """After "I'm good": channels list, then what's next."""
-        self._speak_channel_list()
+        """After "I'm good": shows list, then what's next."""
+        self._speak_show_list()
         self._speak_tv_guide()
 
     def _speak_tv_guide(self, event=None):
