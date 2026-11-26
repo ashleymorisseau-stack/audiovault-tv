@@ -71,8 +71,16 @@ def speak(text):
 # A marker file in the temp folder remembers when quiet was left on
 # (for example the app crashed before it could turn it back off), so
 # the next start does not press the key a second time and turn it
-# back off by mistake. Manual version, any time: press NVDA+Shift+S
-# while AudioVault TV is focused; Ctrl+Shift+Q in the app flips it too.
+# back off by mistake — unless the marker is from before this Windows
+# boot, in which case NVDA has restarted and the marker is stale.
+# The key is only ever pressed while this window is actually focused:
+# an earlier version pressed it once at 500 ms no matter what had
+# focus, so the keypress could land in another window and NVDA kept
+# saying "pane" in this app with nothing ever trying again. Now the
+# app brings its window forward, waits for focus, and retries every
+# 2 seconds up to 5 times, and tries again whenever the window is
+# activated. Manual version, any time: press NVDA+Shift+S while
+# AudioVault TV is focused; Ctrl+Shift+Q in the app flips it too.
 # Honest limit: this is a blind keypress toggle — NVDA gives the app no
 # way to ask whether sleep is already on. If her NVDA key ever changes
 # from Insert, the keypress will do nothing and she should press
@@ -96,6 +104,28 @@ def _press_nvda_sleep_toggle():
         for vk in (0x53, VK_INSERT, VK_SHIFT):
             user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
         return True
+    except Exception:
+        return False
+
+
+def _nvda_quiet_marker_stale():
+    """True if the quiet marker is from before this Windows boot.
+
+    The marker says a previous run left NVDA quiet on, but NVDA
+    sleep does not survive an NVDA or PC restart. If the marker
+    was written before the current boot, NVDA has restarted since
+    and is awake again, so the marker must not be trusted.
+    Boot time is now minus the system uptime (GetTickCount64).
+    If anything about the check fails, the marker is trusted,
+    which is the old behaviour.
+    """
+    try:
+        if not _NVDA_QUIET_MARKER.exists():
+            return False
+        uptime_ms = ctypes.windll.kernel32.GetTickCount64()
+        boot_time = time.time() - (uptime_ms / 1000.0)
+        marker_time = _NVDA_QUIET_MARKER.stat().st_mtime
+        return marker_time < boot_time - 60
     except Exception:
         return False
 
@@ -166,6 +196,11 @@ class PlayerFrame(wx.Frame):
         # this listening session, so they are not played again
         # and the low chime is not repeated at the end.
         self._wake_chimes_played = False
+        # NVDA quiet: True means she wants NVDA quiet while in
+        # the app (the default). Ctrl+Shift+Q flips it. The
+        # automatic enable only runs while this is True, so it
+        # never overrules her turning it back on herself.
+        self._nvda_quiet_wanted = True
         self.wake_word_thread = None
         self.is_switching_channels = False  # Flag to prevent multiple channel switches
         self.vault_logged_in = False
@@ -218,7 +253,12 @@ class PlayerFrame(wx.Frame):
         # opens, so it stops talking while she is in the app. Samantha
         # still greets her in her own voice at 1000 ms — that plays
         # through pygame, not NVDA, so quiet mode does not silence it.
+        # If the window is not focused yet when this runs, the enable
+        # keeps trying every 2 seconds, and coming back to the window
+        # tries again too — the key is only ever pressed while this
+        # window is focused, so it cannot toggle sleep for another app.
         wx.CallLater(500, self._enable_nvda_quiet)
+        self.Bind(wx.EVT_ACTIVATE, self._on_activate_nvda_quiet)
     
     def _create_ui(self):
         """Create accessible UI with menu bar"""
@@ -1810,32 +1850,79 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
 
-    def _enable_nvda_quiet(self):
+    def _enable_nvda_quiet(self, _retry=0):
         """Quiet NVDA for this app after the window opens.
 
         Ashley, 2026-11-26: NVDA should stop talking while she is in
-        AudioVault TV and talk again when she closes it. The window is
-        brought to the front first, because the sleep keypress only
-        affects the focused app. If a marker file says a previous run
-        left quiet on (the app crashed before it could turn it back
-        off), NVDA is probably still asleep for this app, so the key
-        is not pressed again — pressing it again would wake NVDA up.
+        AudioVault TV and talk again when she closes it — and she
+        wants the toggle to do it automatically, so she does not
+        have to press anything. The window is brought to the front
+        first, because the sleep keypress only affects the focused
+        app. The key is only pressed once the window is actually
+        focused: an earlier version pressed it once at 500 ms
+        whether the window had focus or not, so the keypress could
+        land in another window, NVDA kept saying "pane" in this
+        app, and nothing ever tried again. Now, if the window is
+        not focused yet, it tries again every 2 seconds, up to
+        5 times. If she comes back to the window later, the
+        activate event tries again too (see _on_activate_nvda_quiet).
+
+        If a marker file says a previous run left quiet on (the
+        app crashed before it could turn it back off), NVDA is
+        probably still asleep for this app, so the key is not
+        pressed again — pressing it again would wake NVDA up.
+        But a marker from before this Windows boot is stale:
+        NVDA restarted since then and is awake again, so a stale
+        marker is deleted and the key is pressed after all.
         """
         global _NVDA_QUIET
         if not NVDA_AVAILABLE:
             return
+        if not getattr(self, "_nvda_quiet_wanted", True):
+            return
+        if _NVDA_QUIET:
+            return
+        if _NVDA_QUIET_MARKER.exists():
+            if _nvda_quiet_marker_stale():
+                try:
+                    _NVDA_QUIET_MARKER.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                self.logger.log_playback("NVDA", "Quiet marker is from before this boot; enabling quiet again")
+            else:
+                _NVDA_QUIET = True
+                try:
+                    self._nvda_quiet_menu_item.Check(True)
+                except Exception:
+                    pass
+                self.logger.log_playback("NVDA", "Quiet mode already on from previous run; key not pressed again")
+                return
         try:
             self.Raise()
             self.SetFocus()
         except Exception:
             pass
-        if _NVDA_QUIET_MARKER.exists():
-            _NVDA_QUIET = True
-            try:
-                self._nvda_quiet_menu_item.Check(True)
-            except Exception:
-                pass
-            self.logger.log_playback("NVDA", "Quiet mode already on from previous run; key not pressed again")
+        wx.CallLater(300, self._press_nvda_quiet_if_focused, _retry)
+
+    def _press_nvda_quiet_if_focused(self, _retry=0):
+        """Press the NVDA sleep key, but only while this window is focused."""
+        global _NVDA_QUIET
+        if not NVDA_AVAILABLE:
+            return
+        if not getattr(self, "_nvda_quiet_wanted", True):
+            return
+        if _NVDA_QUIET:
+            return
+        try:
+            focused = self.IsActive()
+        except Exception:
+            focused = False
+        if not focused:
+            if _retry < 5:
+                wx.CallLater(2000, self._enable_nvda_quiet, _retry + 1)
+                self.logger.log_playback("NVDA", f"Window not focused yet; will try quiet again ({_retry + 1}/5)")
+            else:
+                self.logger.log_playback("NVDA", "Quiet mode not enabled: window never took focus; press Ctrl+Shift+Q once in the app")
             return
         if set_nvda_quiet(True):
             try:
@@ -1843,6 +1930,15 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 pass
             self.logger.log_playback("NVDA", "Quiet mode on: NVDA sleeps while in AudioVault TV")
+
+    def _on_activate_nvda_quiet(self, event):
+        """When the app window becomes the focused one, quiet NVDA if wanted."""
+        try:
+            if event.GetActive():
+                self._enable_nvda_quiet()
+            event.Skip()
+        except Exception:
+            pass
 
     def _disable_nvda_quiet(self):
         """Turn NVDA back on when the app closes, if it was quieted."""
@@ -1857,6 +1953,7 @@ class PlayerFrame(wx.Frame):
         """Flip NVDA quiet mode from the menu or Ctrl+Shift+Q."""
         global _NVDA_QUIET
         if _NVDA_QUIET:
+            self._nvda_quiet_wanted = False
             set_nvda_quiet(False)
             try:
                 self._nvda_quiet_menu_item.Check(False)
@@ -1864,6 +1961,7 @@ class PlayerFrame(wx.Frame):
                 pass
             speak("NVDA is back on. I will talk in Audio Vault TV again.")
         else:
+            self._nvda_quiet_wanted = True
             if NVDA_AVAILABLE and nvda:
                 try:
                     nvda.nvdaController_cancelSpeech()
@@ -2106,11 +2204,22 @@ class PlayerFrame(wx.Frame):
         started, so it is not played again at the end of the
         request — that was the double. If the wake chimes did
         not play for this session, the end chime plays as
-        before. Either way the flag is cleared, so the next
-        listening session can chime again.
+        before.
+
+        Ashley, 2026-11-26: start of request once, then end
+        of request once. In wake-word mode (Ctrl+Shift+W) the
+        listening session stays open for many commands, so
+        the flag is NOT cleared here — otherwise the low
+        chime would ring again after the second command,
+        and the third, and so on. It is cleared when wake
+        word mode stops, so the next time she calls Samantha
+        the chimes play again, once each. In one-time mode
+        (Ctrl+Shift+B) the session ends with the request,
+        so the flag is cleared here.
         """
         if self._wake_chimes_played:
-            self._wake_chimes_played = False
+            if not self.wake_word_mode:
+                self._wake_chimes_played = False
             return
         self._play_sound_effect("end_of_request.wav")
     
