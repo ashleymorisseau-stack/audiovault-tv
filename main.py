@@ -2,9 +2,10 @@ import time
 # Ashley, 2026-11-26: NO print() at startup. NVDA reads the
 # terminal out loud, so every "Loading ..." line was spoken
 # by NVDA while Audio Vault TV opened, and she does not want
-# that. Loading is silent now — Samantha says hello in her
-# own voice when the app is ready, in _show_greeting_dialog,
-# and that is the only loading signal she hears.
+# that. Loading is silent now — Samantha says "Audio Vault TV"
+# in her own voice when the app is ready, in
+# _show_greeting_dialog, then greets her and names the channels
+# she has, and that is the only loading signal she hears.
 import wx
 import os
 import json
@@ -1503,21 +1504,25 @@ class PlayerFrame(wx.Frame):
             # Friends", "watch Classic Doctor Who". _find_local_
             # channel matches exact, then starts-with, then
             # contains, so "friends" finds the Friends channel.
-            # If nothing matches, Samantha says so instead of
-            # just toggling play/pause.
+            # She also asked: "when I choose one, I want her to
+            # tell me if I have it or not." So the answer says
+            # plainly whether she has it. And it is read through
+            # _speak_and_requiet, not plain speak(): with NVDA
+            # quiet on, plain speak() is silent, so she would
+            # otherwise hear nothing at all when she picks one.
             found = self._find_local_channel(query)
             if found:
                 self._switch_to_channel(found)
                 if self.playlist.get_current():
                     self.player.play()
-                    msg = f"Now playing: {found}"
+                    msg = f"You have {found}. Now playing: {found}."
                 else:
-                    msg = f"Switched to {found}, but there is nothing to play."
+                    msg = f"You have {found}, but there is nothing to play."
             else:
-                msg = (f"I couldn't find a channel called {query}, "
+                msg = (f"You don't have a channel called {query}, "
                        "so I didn't change anything.")
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._speak_and_requiet(lambda: speak(msg))
             return
         elif command == 'play_pause':
             self._toggle_play_pause()
@@ -2169,18 +2174,45 @@ class PlayerFrame(wx.Frame):
             except Exception as e:
                 print(f"Could not play sound effect {filename}: {e}")
 
+    def _wake_chime_delay_ms(self):
+        """How long to wait before the low chime, in milliseconds.
+
+        The high chime (start_of_request.wav) is one long note
+        and lasts about 4.6 seconds. A fixed 2-second wait made
+        the low chime start while the high chime was still
+        ringing, so they played at the same time. The low chime
+        now waits until the high chime has actually finished,
+        plus a short quiet gap. The length is read from the
+        file itself, so it stays right even if the chime file
+        is ever replaced.
+        """
+        try:
+            import wave
+            path = Path(__file__).parent / "sounds" / "start_of_request.wav"
+            with wave.open(str(path), "rb") as w:
+                seconds = w.getnframes() / float(w.getframerate())
+            return int(seconds * 1000) + 300
+        except Exception:
+            return 5000
+
     def _play_wake_chimes(self):
-        """Wake chimes: high chime first, low chime 2 seconds later.
+        """Wake chimes: high chime first, low chime after it finishes.
 
         Ashley, 2026-11-26: "make it go on the high chime and
         then two seconds later have it on a low chime" — using
         the chimes she already has, nothing new. The high chime
         is start_of_request.wav (one long high C), the low chime
-        is end_of_request.wav (medium G to medium C). Listening
-        stays open the whole time — 20 seconds one-time,
-        15 seconds after a wake word — so the low chime at
-        2 seconds does not cut her off; she still has plenty
-        of time to speak.
+        is end_of_request.wav (medium G to medium C). But the
+        high chime lasts about 4.6 seconds, so "two seconds
+        later" started the low chime while the high chime was
+        still ringing — they played at the same time, and she
+        said they are supposed to be separate. Now the low
+        chime waits until the high chime has finished, plus a
+        short quiet gap, so you hear one high chime, a pause,
+        then one low chime, each once only. Listening stays
+        open the whole time — 20 seconds one-time, 15 seconds
+        after a wake word — so the low chime does not cut her
+        off; she still has plenty of time to speak.
 
         Ashley, 2026-11-26: the chimes were playing twice, and
         they are supposed to play once — once on the high,
@@ -2193,8 +2225,8 @@ class PlayerFrame(wx.Frame):
             return
         self._wake_chimes_played = True
         self._play_sound_effect("start_of_request.wav")
-        wx.CallLater(2000, self._play_sound_effect,
-                     "end_of_request.wav")
+        wx.CallLater(self._wake_chime_delay_ms(),
+                     self._play_sound_effect, "end_of_request.wav")
 
     def _play_end_chime(self):
         """End-of-request chime, once only.
@@ -2224,17 +2256,34 @@ class PlayerFrame(wx.Frame):
         self._play_sound_effect("end_of_request.wav")
     
     def _show_greeting_dialog(self):
-        """Samantha-only greeting, no pop-up dialog.
+        """Startup greeting, in Samantha's voice, step by step.
 
-        Ashley, 2026-11-26: NVDA kept saying "Greeting dialogue"
-        (and "pane") when this pop-up opened, and she does not want
-        NVDA to say anything here. So there is no dialog any more:
-        Samantha asks how she is doing in her own recorded voice,
-        NVDA speech is cancelled first so it does not talk over
-        her, and nothing is spoken through NVDA. The current
-        channel is already loaded at startup, so she can just
-        press Space to play, or use a voice command to pick a
-        channel — no typing in a dialog is needed.
+        Ashley, 2026-11-26: "I want her to say Audio Vault TV
+        then greet me and then ask me what channels and then
+        name the channel lists and then that's it." So when the
+        app opens (or she says hello), Samantha does exactly
+        that, one thing at a time, and then stops and waits
+        for Ashley to choose:
+        1. "Audio Vault TV" in Samantha's own recorded voice
+           (sounds/audio_vault_tv.wav, about 2 seconds).
+        2. The greeting, "Hi Sweetie! How are you doing? What
+           do you want to watch?" (about 5 seconds) — that is
+           also the ask about what channels she wants.
+        3. The list of shows she has, read out so she can
+           choose ("Here are the shows you have: ... Tell me
+           which one you want to watch.").
+        Then that's it — listening starts only once the list
+        has finished being read, so her answer is heard and
+        Samantha's own reading is not heard as a command.
+
+        NVDA kept saying "Greeting dialogue" (and "pane")
+        when this pop-up opened, and she does not want NVDA
+        to say anything here. So there is no dialog any more:
+        NVDA speech is cancelled first so it does not talk
+        over her, and nothing is spoken through NVDA. The
+        current channel is already loaded at startup, so she
+        can just press Space to play, or use a voice command
+        to pick a channel — no typing in a dialog is needed.
         """
         # Stop any NVDA speech in progress, so Samantha is the
         # only voice she hears for the greeting.
@@ -2243,20 +2292,38 @@ class PlayerFrame(wx.Frame):
                 nvda.nvdaController_cancelSpeech()
             except Exception:
                 pass
+        # Step 1: "Audio Vault TV" in Samantha's voice.
+        self._play_sound_effect("audio_vault_tv.wav")
+        self.status_label.SetLabel("Audio Vault TV")
+        wx.CallLater(2200, self._startup_greeting)
+
+    def _startup_greeting(self):
+        """Startup step 2: the greeting, then the channel list."""
         self._play_sound_effect("samantha_how_are_you_doing.wav")
         self.status_label.SetLabel(
             "Hi Sweetie! How are you doing? What do you want to watch?")
-        # Ashley, 2026-11-26: she answered "I'm good" right
-        # after this greeting, but nobody was listening yet —
-        # the app only listens after Ctrl+Shift+B or a wake
-        # word. So once the greeting (about 5 sec) has played,
-        # start one-time listening for 20 seconds, so her
-        # answer is actually heard. The start bell rings so
-        # she knows Samantha is listening.
-        wx.CallLater(5500, self._listen_after_greeting)
+        # The greeting is about 5 seconds; wait for it to
+        # finish, plus a short pause, before the list.
+        wx.CallLater(5400, self._startup_show_list)
+
+    def _startup_show_list(self):
+        """Startup step 3: name the channels she has, then stop.
+
+        The list is read in the app's usual speaking voice
+        (Samantha's recordings cannot read new show names),
+        through _speak_and_requiet so Ashley hears it even
+        with NVDA quiet on. Listening starts only after the
+        list has finished, using the same reading-time
+        estimate, plus a second.
+        """
+        self._speak_and_requiet(self._speak_show_list)
+        words = len(str(self.status_label.GetLabel()).split())
+        ms = int((words / 2.5 + 6) * 1000)
+        wx.CallLater(ms, self._listen_after_greeting)
 
     def _listen_after_greeting(self):
-        """Start one-time listening after the startup greeting,
+        """Start one-time listening after the startup sequence
+        (announcement, greeting, channel list) has finished,
         unless voice control is off or already listening."""
         if not self.voice_available:
             return
