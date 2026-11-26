@@ -109,11 +109,11 @@ Listening starts as soon as the greeting finishes, because you answer "I'm good"
 
 ## Samantha Reads the List Herself — No NVDA, No Microsoft
 
-The list of shows, the list of channels, the TV guide, and the "you have it / you don't have it" answer are all read by Samantha herself, not by NVDA. NVDA stays quiet for all of it.
+The list of shows, the list of channels, the TV guide, and the "you have it / you don't have it" answer are all read by Samantha herself, not by NVDA. NVDA never reads the list — Ashley said "I don't want NVDA to use the list. I want her to use the list." NVDA stays quiet for all of it, and the quiet toggle is never turned off for a reading.
 
 Samantha's recorded voice cannot read show names she never recorded, so the readings use a reading voice that can say any words. There is exactly one reading voice, and it is NOT Microsoft: Edge TTS, a warm female neural voice (Aria). Microsoft's own speech (System.Speech / Zira) was tried once and is gone for good — Ashley said "I didn't tell you to add Microsoft" and "I don't like Microsoft Sierra", so it is never used, not even as a fallback.
 
-The reading voice was not installed on her PC, which is why the Microsoft voice was used instead. So when the app opens, it now tries once a day to install Edge TTS itself (python -m pip install edge-tts), in the background, with no window and nothing blocked. If that works, the next reading uses Samantha's reading voice. Until it succeeds, readings fall back to NVDA for now — better than silence, and she can say what she hears.
+The reading voice was not installed on her PC, which is why the Microsoft voice was used instead. So when the app opens, it now tries to install Edge TTS itself (python -m pip install edge-tts), in the background, with no window and nothing blocked. A failed try is tried again the next time the app opens. If the reading voice is not ready yet when she asks for the list, Samantha says so herself in her own recorded voice — "My reading voice isn't ready yet. Give me a moment, then ask me again." — instead of NVDA reading anything. Ask again after a little while and the list should come in her reading voice.
 
 One voice at a time: a reading now waits for any Samantha recording that is still playing ("I'm on it", the guide intro, the greeting) to finish before it starts, and listening waits while Samantha is reading, so nothing talks over her and she is never heard as her own command.
 
@@ -135,7 +135,7 @@ NVDA must not talk at all while you are in Audio Vault TV. The app presses NVDA+
 
 Why it did not work before: the app always pressed Insert+Shift+S, but that only works when your NVDA key is Insert (desktop keyboard layout). With the laptop layout your NVDA key is CapsLock, so that keypress did nothing at all and NVDA kept reading everything. The app now reads NVDA's own settings file (%APPDATA%\nvda\nvda.ini) to find which key your NVDA uses — CapsLock for laptop layout, Insert or Numpad Insert for desktop — and presses the right one. It also only presses the key once the app window is actually focused, retries if it is not, and tries again when you come back to the window.
 
-One honest limit, now fixed: the show list, the TV guide, and the "you have it / you don't have it" answers used to be read by NVDA's voice, because Samantha's voice is recordings and a recording cannot read show names she never recorded. They are now read by Samantha's reading voice instead (see "Samantha Reads the List Herself" above), and NVDA is silent for everything in the app once the sleep toggle works. Microsoft's voice is gone entirely. Until Edge TTS finishes installing itself, the readings still come through NVDA — tell her what you hear and it will be fixed from there.
+One honest limit, now fixed: the show list, the TV guide, and the "you have it / you don't have it" answers used to be read by NVDA's voice, because Samantha's voice is recordings and a recording cannot read show names she never recorded. They are now read by Samantha's reading voice instead (see "Samantha Reads the List Herself" above), and NVDA never reads the list at all — if the reading voice is not ready yet, Samantha says so herself in her own voice. Microsoft's voice is gone entirely.
 
 When you choose one — "play Friends", "watch Classic Doctor Who" — she tells you plainly if you have it or not: "You have Friends. Now playing: Friends." or "You don't have a channel called ... , so I didn't change anything."
 

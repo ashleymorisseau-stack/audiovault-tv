@@ -4980,13 +4980,18 @@ class PlayerFrame(wx.Frame):
         Used for the show list, the channel list, the TV guide,
         and the "you have it / you don't have it" answer — the
         readings Ashley asked Samantha herself to do. NVDA
-        quiet stays on the whole time, so NVDA says nothing
-        while a reading voice is available. Falls back to NVDA
-        speak() only when edge-tts is not installed yet.
-        Returns after starting the reading (it plays in the
-        background); the _samantha_reading flag stays up while
-        it plays so listening does not hear Samantha's own
-        voice as a command, and so nothing else talks over her.
+        NEVER reads the list: Ashley, 2026-11-26, "I don't
+        want NVDA to use the list. I want her to use the
+        list." So when the reading voice is not installed yet,
+        Samantha says so herself in her own recorded voice
+        (sounds/samantha_reading_not_ready.wav) instead of
+        falling back to NVDA, and the app tries once more to
+        get the reading voice installed. NVDA quiet stays on
+        the whole time. Returns after starting the reading (it
+        plays in the background); the _samantha_reading flag
+        stays up while it plays so listening does not hear
+        Samantha's own voice as a command, and so nothing
+        else talks over her.
         """
         if not text:
             return
@@ -4995,7 +5000,16 @@ class PlayerFrame(wx.Frame):
             threading.Thread(target=self._edge_tts_read,
                              args=(text,), daemon=True).start()
             return
-        speak(text)
+        # No reading voice yet: Samantha says so herself.
+        # Never NVDA, never Microsoft.
+        self._samantha_reading = True
+        self._play_sound_effect("samantha_reading_not_ready.wav")
+        wx.CallLater(5500, setattr, self, "_samantha_reading", False)
+        if not getattr(self, "_edge_install_retried", False):
+            self._edge_install_retried = True
+            self._samantha_voice_mode_cache = "unset"
+            threading.Thread(target=self._ensure_edge_tts,
+                             daemon=True).start()
 
     def _edge_tts_read(self, text):
         """Synthesize text with Edge TTS and play it (thread)."""
@@ -5026,10 +5040,15 @@ class PlayerFrame(wx.Frame):
             wx.CallAfter(self._play_dynamic_wav, path, words)
         except Exception:
             # Edge TTS failed (no internet, library problem):
-            # fall back to NVDA. Microsoft speech is never
-            # used — Ashley does not want it.
-            self._samantha_reading = False
-            wx.CallAfter(speak, text)
+            # Samantha says her reading voice isn't ready, in
+            # her own voice. Never NVDA for the list, never
+            # Microsoft. _samantha_reading stays up until the
+            # clip finishes, so nothing talks over her.
+            wx.CallAfter(self._play_sound_effect,
+                         "samantha_reading_not_ready.wav")
+            wx.CallAfter(
+                lambda: wx.CallLater(
+                    5500, setattr, self, "_samantha_reading", False))
 
     def _ensure_edge_tts(self):
         """Get Samantha's reading voice ready, in the background.
@@ -5040,35 +5059,40 @@ class PlayerFrame(wx.Frame):
         Samantha. The reading voice is Edge TTS, but that
         library was not installed on her PC (that is why the
         Microsoft voice was used instead). So when the app
-        opens, it tries once a day to install edge-tts itself
-        (python -m pip install edge-tts), in a background
-        thread that never blocks the app and shows no window.
-        If it works, the next reading uses Samantha's reading
-        voice; if it fails (no internet, no pip), nothing
-        breaks — readings stay on NVDA until it succeeds.
+        opens, it tries to install edge-tts itself (python -m
+        pip install edge-tts), in a background thread that
+        never blocks the app and shows no window. If it works,
+        the next reading uses Samantha's reading voice. If it
+        fails (no internet, no pip), nothing breaks — Samantha
+        says her reading voice isn't ready yet, in her own
+        voice, and the install is tried again the next time
+        the app opens (a failed try is not counted as done).
         """
         try:
             flag = Path(tempfile.gettempdir()) / "audiovault_edge_tts_tried.txt"
             today = time.strftime("%Y-%m-%d")
             if flag.exists():
                 try:
-                    if flag.read_text().strip() == today:
+                    # Only a successful install counts as done
+                    # for today; a failed try is retried.
+                    if flag.read_text().strip() == today + ":ok":
                         return
                 except Exception:
                     pass
-            try:
-                flag.write_text(today)
-            except Exception:
-                pass
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             else:
                 startupinfo = None
-            subprocess.run(
+            result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "edge-tts"],
                 capture_output=True, timeout=300,
                 startupinfo=startupinfo)
+            try:
+                flag.write_text(today + (":ok" if result.returncode == 0
+                                         else ":fail"))
+            except Exception:
+                pass
             # Installed (or already there): let the next
             # reading re-check and use it.
             self._samantha_voice_mode_cache = "unset"
@@ -5101,26 +5125,15 @@ class PlayerFrame(wx.Frame):
         """Run speak_fn, making sure Ashley actually hears it.
 
         Ashley, 2026-11-26: she wants Samantha herself to read
-        the list, not NVDA. When a Samantha reading voice is
-        available (see _samantha_voice_mode), speak_fn reads
-        through it and NVDA quiet stays on the whole time —
-        NVDA says nothing at all. Only when no reading voice
-        is available does quiet turn off just for the reading
-        through NVDA, then back on after NVDA has had time to
-        read it (about 150 words a minute, plus a few seconds
-        for Samantha's recorded intro).
+        the list, not NVDA — "I don't want NVDA to use the
+        list. I want her to use the list." So NVDA quiet is
+        NEVER turned off for a reading. speak_fn reads through
+        Samantha's reading voice when it is available, and
+        when it is not, Samantha says so herself in her own
+        recorded voice (see _say_in_samantha_voice). NVDA
+        says nothing at all, either way.
         """
-        if self._samantha_voice_mode() is not None:
-            speak_fn()
-            return
-        was_quiet = _NVDA_QUIET
-        if was_quiet:
-            set_nvda_quiet(False)
         speak_fn()
-        if was_quiet:
-            words = len(str(self.status_label.GetLabel()).split())
-            ms = int((words / 2.5 + 5) * 1000)
-            wx.CallLater(ms, set_nvda_quiet, True)
 
     def _speak_show_list(self):
         """Read out all the shows Ashley has, so she can choose
@@ -5160,29 +5173,12 @@ class PlayerFrame(wx.Frame):
     def _speak_channels_and_guide(self):
         """After "I'm good": shows list, then what's next.
 
-        When Samantha has a reading voice, both readings go
-        through it and NVDA quiet stays on — NVDA says
-        nothing. Only without a reading voice is quiet turned
-        off for the whole reading and back on once, after both
-        the list and the guide, using their combined word
-        count — not once per reading, or the guide would be
-        cut off halfway.
+        Both readings go through Samantha's voice (see
+        _say_in_samantha_voice), and NVDA quiet is never
+        turned off for a reading — NVDA never reads the list.
         """
-        if self._samantha_voice_mode() is not None:
-            self._speak_show_list()
-            self._speak_tv_guide()
-            return
-        was_quiet = _NVDA_QUIET
-        if was_quiet:
-            set_nvda_quiet(False)
         self._speak_show_list()
-        show_text = self.status_label.GetLabel()
         self._speak_tv_guide()
-        guide_text = self.status_label.GetLabel()
-        if was_quiet:
-            words = len(str(show_text).split()) + len(str(guide_text).split())
-            ms = int((words / 2.5 + 6) * 1000)
-            wx.CallLater(ms, set_nvda_quiet, True)
 
     def _speak_tv_guide(self, event=None):
         """Read the whole TV guide out loud.
