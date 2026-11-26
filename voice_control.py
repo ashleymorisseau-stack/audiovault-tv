@@ -338,6 +338,18 @@ class VoiceControl:
                     "i'm doing good", "i am doing good"):
             return 'feeling_good'
 
+        # --- "Can you hear me?": Ashley, 2026-11-26. When she
+        # asks if Samantha can hear her, Samantha answers
+        # "Yes, I can hear you" in her own voice. Checked
+        # before search/play, so it is not treated as a
+        # search for a show called that.
+        if re.search(
+                r"\bcan you hear me\b|\bdo you hear me\b"
+                r"|\bdid you hear me\b|\bcan you hear\b"
+                r"|\bare you listening\b|\bcan you hear us\b",
+                text):
+            return 'can_you_hear_me'
+
         # --- List shows: Ashley, 2026-11-26. "What are my
         # options?" / "tell me the list of shows I have so I
         # can choose a channel". Checked before live-TV search

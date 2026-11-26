@@ -410,14 +410,11 @@ class PlayerFrame(wx.Frame):
                 self._next_channel()
         elif keycode == ord('Q') and ctrl and shift:
             self._on_toggle_nvda_quiet()
-        elif keycode == ord('G') and ctrl and shift:
-            # Ashley, 2026-11-26: Ctrl+Shift+G is the new
-            # NVDA-quiet toggle she asked for. Ctrl+Shift+Q
-            # still works too. (Her "Control Shift NVDA G"
-            # wording would add the NVDA key on top, which
-            # NVDA itself already uses for sleep mode, so
-            # the app toggle is Ctrl+Shift+G.)
-            self._on_toggle_nvda_quiet()
+        # NOTE, Ashley, 2026-11-26: Ctrl+Shift+G was tried as
+        # a second NVDA-quiet key, but it is already the TV
+        # guide key ("What's Coming Up Next", menu line 290),
+        # so it stays the guide. Ctrl+Shift+Q is the NVDA
+        # quiet toggle.
         elif keycode == ord('B') and ctrl and shift:
             self._toggle_voice_listening()
         elif keycode == ord('W') and ctrl and shift:
@@ -1388,17 +1385,28 @@ class PlayerFrame(wx.Frame):
             self.status_label.SetLabel(msg)
             wx.CallLater(6000, self._speak_channels_and_guide)
             return
+        elif command == 'can_you_hear_me':
+            # Ashley, 2026-11-26: when she asks "can you hear
+            # me", Samantha answers in her own recorded voice:
+            # "Yes, I can hear you." (sounds/samantha_yes_i_can.wav)
+            # NVDA does not repeat it.
+            self._play_sound_effect("samantha_yes_i_can.wav")
+            msg = "Yes, I can hear you."
+            self.status_label.SetLabel(msg)
+            return
         elif command == 'list_channels':
             # "Samantha, list all the channels I have" — read
             # them out, without opening the channel picker.
-            self._speak_channel_list()
+            # Heard even with NVDA quiet on (see _speak_and_requiet).
+            self._speak_and_requiet(self._speak_channel_list)
             return
         elif command == 'list_shows':
             # Ashley, 2026-11-26: "What are my options?" /
             # "tell me the list of shows I have so I can
             # choose a channel". Samantha reads the shows,
-            # so Ashley can pick one by name.
-            self._speak_show_list()
+            # so Ashley can pick one by name. Heard even with
+            # NVDA quiet on (see _speak_and_requiet).
+            self._speak_and_requiet(self._speak_show_list)
             return
         elif command == 'play_live_tv':
             # "Samantha, play live TV" - a favourite live channel
@@ -1627,10 +1635,11 @@ class PlayerFrame(wx.Frame):
     
     def _wake_word_detected(self):
         """Handle wake word detection"""
-        self._play_sound_effect("start_of_request.wav")
-        # Ashley, 2026-11-26: when she calls Samantha — by
-        # Samantha, Sam, Sammy, Guide, or Metro — Samantha
-        # answers "Yes?" in her own recorded voice
+        # Ashley, 2026-11-26: the wake chime should be steadier.
+        # The start bell already rang once when wake-word mode
+        # started (Ctrl+Shift+W), so it is not played again
+        # here — a second bell on top of it was doubling up.
+        # Samantha just answers "Yes?" in her own voice
         # (sounds/samantha_yes.wav), then listens for the
         # command. The "Hi Sweetie, how are you doing?"
         # greeting stays for startup and the greet command.
@@ -2067,6 +2076,23 @@ class PlayerFrame(wx.Frame):
         self._play_sound_effect("samantha_how_are_you_doing.wav")
         self.status_label.SetLabel(
             "Hi Sweetie! How are you doing? What do you want to watch?")
+        # Ashley, 2026-11-26: she answered "I'm good" right
+        # after this greeting, but nobody was listening yet —
+        # the app only listens after Ctrl+Shift+B or a wake
+        # word. So once the greeting (about 5 sec) has played,
+        # start one-time listening for 20 seconds, so her
+        # answer is actually heard. The start bell rings so
+        # she knows Samantha is listening.
+        wx.CallLater(5500, self._listen_after_greeting)
+
+    def _listen_after_greeting(self):
+        """Start one-time listening after the startup greeting,
+        unless voice control is off or already listening."""
+        if not self.voice_available:
+            return
+        if self.is_voice_listening or self.wake_word_mode:
+            return
+        self._toggle_voice_listening()
     
     def _ask_channel_to_play(self, prompt_message):
         """Ask which channel to play"""
@@ -4425,6 +4451,30 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
 
+    def _speak_and_requiet(self, speak_fn):
+        """Run speak_fn (which speaks through NVDA), making sure
+        Ashley actually hears it even with NVDA quiet on, then
+        quiet again.
+
+        Ashley, 2026-11-26: "I'm good" was not working — after
+        Samantha's recorded reply, the shows list and the guide
+        went through speak(), which is silent while NVDA quiet
+        mode is on, so she heard nothing. The list and guide
+        have to be heard through NVDA (Samantha's recordings
+        cannot read new show names), so quiet is turned off
+        just for the reading, then back on after NVDA has had
+        time to read it (about 150 words a minute, plus a
+        few seconds for Samantha's recorded intro).
+        """
+        was_quiet = _NVDA_QUIET
+        if was_quiet:
+            set_nvda_quiet(False)
+        speak_fn()
+        if was_quiet:
+            words = len(str(self.status_label.GetLabel()).split())
+            ms = int((words / 2.5 + 5) * 1000)
+            wx.CallLater(ms, set_nvda_quiet, True)
+
     def _speak_show_list(self):
         """Read out all the shows Ashley has, so she can choose
         a channel.
@@ -4461,9 +4511,26 @@ class PlayerFrame(wx.Frame):
         speak(msg)
 
     def _speak_channels_and_guide(self):
-        """After "I'm good": shows list, then what's next."""
+        """After "I'm good": shows list, then what's next.
+
+        Ashley, 2026-11-26: this was silent with NVDA quiet
+        on, because both readings go through speak(). So
+        quiet is turned off for the whole reading and back
+        on once, after both the list and the guide, using
+        their combined word count — not once per reading,
+        or the guide would be cut off halfway.
+        """
+        was_quiet = _NVDA_QUIET
+        if was_quiet:
+            set_nvda_quiet(False)
         self._speak_show_list()
+        show_text = self.status_label.GetLabel()
         self._speak_tv_guide()
+        guide_text = self.status_label.GetLabel()
+        if was_quiet:
+            words = len(str(show_text).split()) + len(str(guide_text).split())
+            ms = int((words / 2.5 + 6) * 1000)
+            wx.CallLater(ms, set_nvda_quiet, True)
 
     def _speak_tv_guide(self, event=None):
         """Read the whole TV guide out loud.
@@ -4481,8 +4548,11 @@ class PlayerFrame(wx.Frame):
         speak(text)
 
     def _on_tv_guide(self, event=None):
-        """Menu / Ctrl+Shift+G: read the TV guide."""
-        self._speak_tv_guide()
+        """Menu / Ctrl+Shift+G: read the TV guide.
+
+        Heard even with NVDA quiet on (see _speak_and_requiet).
+        """
+        self._speak_and_requiet(self._speak_tv_guide)
 
     # ---- Delete a channel and its downloads ----
     def _find_local_channel(self, query):

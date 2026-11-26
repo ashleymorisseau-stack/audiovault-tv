@@ -79,13 +79,27 @@ Ask Samantha, by voice, "What are my options?" or "tell me the list of shows I h
 
 Audio Vault TV does not print "Loading ..." lines any more, because NVDA reads the terminal out loud and was saying every loading line while the app opened. Loading is silent now. The only thing you hear is Samantha, in her own voice, saying "Hi Sweetie! How are you doing? What do you want to watch?" when the app is ready.
 
-## NVDA Quiet Toggle — Ctrl+Shift+G
+## NVDA Quiet Toggle — Ctrl+Shift+Q
 
-Press Ctrl+Shift+G in Audio Vault TV to turn NVDA quiet on or off while you are in the app. Ctrl+Shift+Q still works too. When NVDA is quiet, you hear Samantha's voice and the shows, not NVDA. When you close the app, NVDA talks again. The menus themselves are still read by NVDA when NVDA is back on, because Samantha's voice is recordings and cannot read new menu names she never recorded — the same limit as the TV guide.
+Press Ctrl+Shift+Q in Audio Vault TV to turn NVDA quiet on or off while you are in the app. When NVDA is quiet, you hear Samantha's voice and the shows, not NVDA. When you close the app, NVDA talks again. The menus themselves are still read by NVDA when NVDA is back on, because Samantha's voice is recordings and cannot read new menu names she never recorded — the same limit as the TV guide.
+
+Ctrl+Shift+G is not the NVDA toggle — it was already the TV guide key ("What's Coming Up Next"), so it stays the guide. If you press Ctrl+Shift+G you hear the guide, not a toggle.
 
 ## Downloads in Samantha's Voice
 
 When Samantha starts downloading a show for you, from AudioVault.net or from YouTube, she says in her own recorded voice "I'm downloading that show for you" (sounds/samantha_downloading.wav), so you hear it even with NVDA quiet on.
+
+## "Can You Hear Me?" — "Yes, I Can Hear You"
+
+When you ask Samantha "can you hear me", "do you hear me", or "are you listening", she answers in her own recorded voice "Yes, I can hear you" (sounds/samantha_yes_i_can.wav).
+
+## "I'm Good" — Fixed So You Actually Hear the List
+
+When Samantha greets you at startup and asks how you are doing, she now starts listening right after the greeting, so when you answer "I'm good" she actually hears it — before, nobody was listening until you pressed Ctrl+Shift+B or said a wake word. After her recorded reply, she reads your shows and what's coming up next. That list and guide were going silent when NVDA quiet was on, because they are read through NVDA and NVDA was quiet — so now NVDA quiet turns off just for that reading, and back on again after it finishes.
+
+## Wake Chimes — Steadier
+
+The wake chimes (sounds/start_of_request.wav and sounds/end_of_request.wav) were levelled so they play at a steadier volume, same length as before. The start bell also no longer rings twice when you call Samantha — it rings once when wake-word mode starts, and then Samantha just answers "Yes?" in her own voice.
 
 ## Live TV by Voice
 
