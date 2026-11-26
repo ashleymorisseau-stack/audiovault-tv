@@ -1,4 +1,5 @@
 import time
+import sys
 # Ashley, 2026-11-26: NO print() at startup. NVDA reads the
 # terminal out loud, so every "Loading ..." line was spoken
 # by NVDA while Audio Vault TV opened, and she does not want
@@ -242,9 +243,13 @@ class PlayerFrame(wx.Frame):
         # automatic re-arm waits instead of listening to her
         # own reading as if it were a command.
         self._samantha_reading = False
-        # Cached result of _samantha_voice_mode(): "edge",
-        # "sapi", or None. None until first checked.
+        # Cached result of _samantha_voice_mode(): "edge" or
+        # None. None until first checked.
         self._samantha_voice_mode_cache = "unset"
+        # Get Samantha's reading voice ready in the background
+        # (installs edge-tts once a day if it is missing).
+        threading.Thread(target=self._ensure_edge_tts,
+                         daemon=True).start()
         # Ashley, 2026-11-26: the wake chimes were playing twice.
         # This flag says the high+low chimes already played for
         # this listening session, so they are not played again
@@ -496,7 +501,19 @@ class PlayerFrame(wx.Frame):
         # Status display
         self.status_label = wx.StaticText(panel, label="Press Ctrl+T to create a channel")
         sizer.Add(self.status_label, 0, wx.ALL, 10)
-        
+
+        # Type to Samantha: a text box, so Ashley can type a
+        # command when Samantha cannot hear her (Ashley,
+        # 2026-11-26: "I still want the text box just in case
+        # she can't hear me"). Pressing Enter runs it and
+        # Samantha answers in her own voice, the same as if
+        # it had been spoken. Tab reaches the box; NVDA reads
+        # its label.
+        sizer.Add(wx.StaticText(panel, label="Type to Samantha (press Enter):"), 0, wx.LEFT | wx.TOP, 10)
+        self.command_box = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        self.command_box.Bind(wx.EVT_TEXT_ENTER, self._on_command_box_enter)
+        sizer.Add(self.command_box, 0, wx.EXPAND | wx.ALL, 10)
+
         panel.SetSizer(sizer)
     
     def _bind_hotkeys(self):
@@ -505,6 +522,17 @@ class PlayerFrame(wx.Frame):
     
     def _on_key(self, event):
         """Handle keyboard events"""
+        # Typing in the command box: let the box have every
+        # key (Space types a space, Enter sends the command,
+        # arrows move the caret) instead of the app hotkeys,
+        # which would otherwise pause playback on Space.
+        if getattr(self, "command_box", None) is not None:
+            try:
+                if wx.Window.FindFocus() is self.command_box:
+                    event.Skip()
+                    return
+            except Exception:
+                pass
         keycode = event.GetKeyCode()
         ctrl = event.ControlDown()
         shift = event.ShiftDown()
@@ -1469,6 +1497,44 @@ class PlayerFrame(wx.Frame):
             # and ring the low chime a second time. _play_end_chime
             # (on the main thread) owns clearing the flag.
     
+    def _on_command_box_enter(self, event):
+        """Enter pressed in the Type to Samantha box.
+
+        Ashley, 2026-11-26: "I want her to respond when
+        whenever I press enter." Runs the typed text as a
+        command, exactly like a spoken one, and Samantha
+        answers in her own voice.
+        """
+        text = self.command_box.GetValue().strip()
+        if not text:
+            return
+        self.command_box.SetValue("")
+        self.status_label.SetLabel(f"You typed: {text}")
+        self._run_typed_command(text)
+
+    def _run_typed_command(self, text):
+        """Run a typed command through the same path as voice.
+
+        Uses the same parse_command and _execute_voice_command
+        as a spoken command, so typing "play Friends" or "list
+        shows" does exactly what saying it does. Works even
+        when the voice recogniser is not available (no Vosk
+        model): parsing is pure text, so a bare parser is built
+        for the purpose instead of failing.
+        """
+        parser = self.voice
+        if parser is None:
+            try:
+                parser = VoiceControl()
+            except Exception:
+                # No model: parsing needs no model, only the
+                # word lists, so build a bare parser.
+                parser = VoiceControl.__new__(VoiceControl)
+                parser.wake_words = ("samantha", "sammy", "sam",
+                                     "guide", "metro")
+        command = parser.parse_command(text)
+        self._execute_voice_command(command, text)
+
     def _execute_voice_command(self, command, text):
         """Execute a voice command"""
         # Handle tuple commands (command, argument)
@@ -2494,13 +2560,20 @@ class PlayerFrame(wx.Frame):
         self._startup_list_pending = False
         self._speak_and_requiet(self._speak_show_list)
         words = len(str(self.status_label.GetLabel()).split())
-        ms = int((words / 2.5 + 6) * 1000)
+        ms = int((words / 2.5 + 8) * 1000)
         wx.CallLater(ms, self._listen_after_greeting)
 
     def _listen_after_greeting(self):
         """Start one-time listening after the startup sequence
         (announcement, greeting, channel list) has finished,
-        unless voice control is off or already listening."""
+        unless voice control is off or already listening.
+        One voice at a time: if Samantha is still reading
+        something out loud, wait and try again in a couple
+        of seconds, so listening does not start while she is
+        talking and hear her own voice as a command."""
+        if getattr(self, "_samantha_reading", False):
+            wx.CallLater(2000, self._listen_after_greeting)
+            return
         if not self.voice_available:
             return
         if self.is_voice_listening or self.wake_word_mode:
@@ -4870,20 +4943,24 @@ class PlayerFrame(wx.Frame):
         shows. I don't want NVDA reading that list of shows.
         I want her to." Samantha's recorded voice cannot read
         show names she never recorded, so dynamic text needs
-        a reading voice that can say any words:
+        a reading voice that can say any words. There is
+        exactly one reading voice, and it is NOT Microsoft:
         - "edge": the edge-tts library is installed, so text
           is spoken with a warm female neural voice
-          (en-US-AriaNeural) over the internet. Fart Wars
-          already uses Edge TTS on this PC.
-        - "sapi": Windows' own speech (System.Speech, built
-          into Windows, no install), female desktop voice
-          (Microsoft Zira Desktop when present).
-        - None: neither is available; readings fall back to
-          NVDA speak(), as before.
+          (en-US-AriaNeural) over the internet. The app tries
+          to install edge-tts itself on startup (see
+          _ensure_edge_tts), so this becomes available
+          without her doing anything.
+        - None: edge-tts is not installed yet; readings fall
+          back to NVDA speak(), as before, until the install
+          succeeds. Microsoft's own built-in speech was tried
+          once and is GONE — Ashley said "I didn't tell you to add Microsoft" and "I don't like
+          Microsoft Sierra", so it is never used, not even as
+          a fallback.
         The result is cached for the run. Honest note: Ashley
-        has not heard the Aria or Zira reading voice yet — no
-        sample could be made from here — so if she does not
-        like it, the voice name is the one line to change.
+        has not heard the Aria reading voice yet — no sample
+        could be made from here — so if she does not like it,
+        the voice name is the one line to change.
         """
         cached = getattr(self, "_samantha_voice_mode_cache", "unset")
         if cached != "unset":
@@ -4894,33 +4971,28 @@ class PlayerFrame(wx.Frame):
             mode = "edge"
         except Exception:
             mode = None
-        if mode is None and os.name == "nt":
-            mode = "sapi"
         self._samantha_voice_mode_cache = mode
         return mode
 
     def _say_in_samantha_voice(self, text):
-        """Read dynamic text in a Samantha-like voice, not NVDA's.
+        """Read dynamic text in Samantha's reading voice, not NVDA's.
 
         Used for the show list, the channel list, the TV guide,
         and the "you have it / you don't have it" answer — the
         readings Ashley asked Samantha herself to do. NVDA
-        quiet stays on the whole time, so NVDA says nothing.
+        quiet stays on the whole time, so NVDA says nothing
+        while a reading voice is available. Falls back to NVDA
+        speak() only when edge-tts is not installed yet.
         Returns after starting the reading (it plays in the
         background); the _samantha_reading flag stays up while
         it plays so listening does not hear Samantha's own
-        voice as a command. Falls back to NVDA speak() when
-        no reading voice is available.
+        voice as a command, and so nothing else talks over her.
         """
         if not text:
             return
         mode = self._samantha_voice_mode()
         if mode == "edge":
             threading.Thread(target=self._edge_tts_read,
-                             args=(text,), daemon=True).start()
-            return
-        if mode == "sapi":
-            threading.Thread(target=self._sapi_read,
                              args=(text,), daemon=True).start()
             return
         speak(text)
@@ -4935,48 +5007,73 @@ class PlayerFrame(wx.Frame):
             self._samantha_reading = True
             asyncio.run(
                 edge_tts.Communicate(text, "en-US-AriaNeural").save(path))
+            # One voice at a time: wait for any Samantha
+            # recording that is still playing ("I'm on it",
+            # the guide intro, the greeting) to finish, so
+            # the reading never talks over it. At most about
+            # 8 seconds; then speak anyway, so a long show
+            # playing in the background does not hold the
+            # reading back forever.
+            for _ in range(40):
+                try:
+                    import pygame
+                    if not pygame.mixer.get_busy():
+                        break
+                except Exception:
+                    break
+                time.sleep(0.2)
             words = len(str(text).split())
             wx.CallAfter(self._play_dynamic_wav, path, words)
         except Exception:
             # Edge TTS failed (no internet, library problem):
-            # fall back to Windows speech, then to NVDA.
+            # fall back to NVDA. Microsoft speech is never
+            # used — Ashley does not want it.
             self._samantha_reading = False
-            if os.name == "nt":
-                self._sapi_read(text)
-            else:
-                wx.CallAfter(speak, text)
+            wx.CallAfter(speak, text)
 
-    def _sapi_read(self, text):
-        """Speak text with Windows' built-in speech (thread).
+    def _ensure_edge_tts(self):
+        """Get Samantha's reading voice ready, in the background.
 
-        PowerShell System.Speech is part of Windows — no
-        install. Female desktop voice (Microsoft Zira Desktop)
-        when present, otherwise the default voice. Speak()
-        blocks the thread, not the app, until it finishes.
+        Ashley, 2026-11-26: she heard Microsoft's voice read
+        the list and does not want Microsoft at all, and she
+        does not want NVDA reading it either — she wants
+        Samantha. The reading voice is Edge TTS, but that
+        library was not installed on her PC (that is why the
+        Microsoft voice was used instead). So when the app
+        opens, it tries once a day to install edge-tts itself
+        (python -m pip install edge-tts), in a background
+        thread that never blocks the app and shows no window.
+        If it works, the next reading uses Samantha's reading
+        voice; if it fails (no internet, no pip), nothing
+        breaks — readings stay on NVDA until it succeeds.
         """
         try:
-            self._samantha_reading = True
-            safe = str(text).replace("'", "''")
-            ps = (
-                "Add-Type -AssemblyName System.Speech; "
-                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                "$z = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like '*Zira*' } | Select-Object -First 1; "
-                "if ($z) { $s.SelectVoice($z.VoiceInfo.Name) }; "
-                f"$s.Speak('{safe}') | Out-Null"
-            )
-            import subprocess
-            startupinfo = None
+            flag = Path(tempfile.gettempdir()) / "audiovault_edge_tts_tried.txt"
+            today = time.strftime("%Y-%m-%d")
+            if flag.exists():
+                try:
+                    if flag.read_text().strip() == today:
+                        return
+                except Exception:
+                    pass
+            try:
+                flag.write_text(today)
+            except Exception:
+                pass
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            else:
+                startupinfo = None
             subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True, timeout=120,
+                [sys.executable, "-m", "pip", "install", "edge-tts"],
+                capture_output=True, timeout=300,
                 startupinfo=startupinfo)
+            # Installed (or already there): let the next
+            # reading re-check and use it.
+            self._samantha_voice_mode_cache = "unset"
         except Exception:
-            wx.CallAfter(speak, text)
-        finally:
-            self._samantha_reading = False
+            pass
 
     def _play_dynamic_wav(self, path, words):
         """Play a synthesized reading file, then delete it."""
