@@ -11,6 +11,8 @@ that cannot be played outside a browser.
 
 import os
 import json
+import re
+import difflib
 import time
 import subprocess
 import urllib.request
@@ -128,12 +130,101 @@ def get_channels_by_category(category):
     return [c for c in _catalog if category in (c["categories"] or ["other"])]
 
 
+def _normalize_live_name(name):
+    """Normalize a channel name for voice matching.
+
+    Ashley, 2026-11-26: Samantha kept hearing live channel names
+    wrong — "p b s kids" for PBS Kids, "game show net work" for
+    Game Show Network — and the old exact / startswith / contains
+    match then found nothing, so she had to try six times. This
+    folds those mishearings back together: lower case, "&" -> "and",
+    punctuation out, single-letter runs joined ("p b s" -> "pbs").
+    """
+    text = str(name or "").lower().replace("&", " and ")
+    text = re.sub(r"[^a-z0-9 ]+", " ", text)
+    words = [w for w in text.split() if w]
+    merged = []
+    run = []
+    for w in words:
+        if len(w) == 1:
+            run.append(w)
+        else:
+            if run:
+                merged.append("".join(run))
+                run = []
+            merged.append(w)
+    if run:
+        merged.append("".join(run))
+    return " ".join(merged)
+
+
+def _live_match_score(query, name):
+    """How close a heard name is to a real channel name, 0 to 1."""
+    q = _normalize_live_name(query)
+    n = _normalize_live_name(name)
+    if not q or not n:
+        return 0.0
+    if q == n:
+        return 1.0
+    q_words = q.split()
+    n_words = n.split()
+    # A channel whose whole name is inside what she said ("history
+    # channel" -> History) wins over a longer name that only shares
+    # a word ("Discovery Channel"), and vice versa.
+    if set(n_words) <= set(q_words):
+        return 0.95
+    if set(q_words) <= set(n_words):
+        return 0.9
+    score = difflib.SequenceMatcher(None, q, n).ratio()
+    # Spaceless comparison catches "gameshow network" / "game show
+    # net work" and similar word-split mishearings.
+    score = max(score, difflib.SequenceMatcher(
+        None, q.replace(" ", ""), n.replace(" ", "")).ratio())
+    # Every heard word present in the channel name is a strong hint,
+    # even if Vosk added or dropped a word around it.
+    n_set = set(n_words)
+    if q_words:
+        overlap = sum(1 for w in q_words if w in n_set) / len(q_words)
+        score = max(score, 0.55 + 0.45 * overlap if overlap >= 0.5 else score)
+    return score
+
+
+def best_live_match(query, channels, threshold=0.6):
+    """Best channel for a heard name, or None if nothing is close.
+
+    Used by voice play: after exact / startswith / contains fail,
+    this lets a slightly misheard name still find its channel
+    instead of Samantha saying she could not find it.
+    """
+    best = None
+    best_score = 0.0
+    for c in channels or []:
+        score = _live_match_score(query, c.get("name", ""))
+        if score > best_score:
+            best_score = score
+            best = c
+    return best if best_score >= threshold else None
+
+
 def search_channels(query):
-    """Search channels by name (case-insensitive)."""
+    """Search channels by name (case-insensitive).
+
+    Exact substring matches come first, then close (fuzzy) matches,
+    so a misheard name still shows its channel instead of nothing.
+    """
     if _catalog is None:
         refresh_catalog()
     q = query.lower().strip()
-    return [c for c in _catalog if q in c["name"].lower()]
+    exact = [c for c in _catalog if q in c["name"].lower()]
+    scored = []
+    for c in _catalog:
+        if c in exact:
+            continue
+        score = _live_match_score(query, c.get("name", ""))
+        if score >= 0.55:
+            scored.append((score, c))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return exact + [c for _, c in scored]
 
 
 def get_all_channels():

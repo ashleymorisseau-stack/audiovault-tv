@@ -3799,7 +3799,8 @@ class PlayerFrame(wx.Frame):
         and other channels. No name = a favourite live channel
         first, otherwise the first live channel. With a name, the
         exact channel name wins, then a name that starts with it,
-        then any channel containing it.
+        then any channel containing it, then the closest channel
+        name (fuzzy, Ashley 2026-11-26 — Vosk mishears names).
         """
         def work():
             try:
@@ -3833,6 +3834,13 @@ class PlayerFrame(wx.Frame):
                         if q in c["name"].lower():
                             channel = c
                             break
+                if channel is None:
+                    # Ashley, 2026-11-26: Vosk hears live channel
+                    # names wrong ("p b s kids", "game show net
+                    # work"), and exact matching found nothing, so
+                    # she had to try six times. Fall back to the
+                    # closest channel name instead of giving up.
+                    channel = livetv.best_live_match(q, channels)
                 wx.CallAfter(self._livetv_voice_play_done, channel, query, None)
             except Exception as e:
                 wx.CallAfter(self._livetv_voice_play_done, None, query, str(e))
