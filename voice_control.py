@@ -290,6 +290,40 @@ class VoiceControl:
         if name_command is not None:
             return name_command
 
+        # --- "I'm good": Ashley, 2026-11-26. Samantha asks
+        # "How are you doing?" in the greeting, and Ashley
+        # answers "I am good". Checked before search/play, so
+        # "good" is not swallowed by another command, and
+        # before the TV guide, so "I'm doing good" is not
+        # treated as a guide request. main.py answers in
+        # Samantha's own voice, then reads her channels and
+        # what comes up next, without her having to ask.
+        if re.search(
+                r"\b(?:i am|i'm|im|i feel|i'm doing|i am doing"
+                r"|i'm feeling|i am feeling|doing|feeling)\s+"
+                r"(?:good|great|fine|okay|ok|well|wonderful"
+                r"|fantastic|awesome|happy|better|alright"
+                r"|pretty good|really good)\b", text):
+            return 'feeling_good'
+        if text in ("good", "i'm good", "i am good", "all good",
+                    "doing good", "feeling good", "i feel good",
+                    "i'm doing good", "i am doing good"):
+            return 'feeling_good'
+
+        # --- List channels: Ashley, 2026-11-26. "List all the
+        # channels that I have" / "what channels do I have".
+        # Checked before live-TV search, so "list channels"
+        # is not treated as a live-channel search.
+        if re.search(
+                r"\b(?:list|show|tell me|read|name)\b.*\bchannels?\b",
+                text) and ("list" in text or "what" in text
+                           or "show" in text or "tell" in text
+                           or "read" in text or "name" in text):
+            return 'list_channels'
+        if re.search(r"\bwhat channels? (?:do i|have i|are there)"
+                     r"|\bwhat are my channels?\b", text):
+            return 'list_channels'
+
         # --- Game Show Network guide: Honey asked 2026-11-23
         # for another guide for the Game Show Network, so she
         # knows what is coming up next there. Checked before the

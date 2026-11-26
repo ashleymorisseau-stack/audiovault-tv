@@ -1365,6 +1365,32 @@ class PlayerFrame(wx.Frame):
                        "name any time, just say my name is Honey.")
             self.status_label.SetLabel(msg)
             return
+        elif command == 'feeling_good':
+            # Ashley, 2026-11-26: Samantha asks "How are you
+            # doing?" in the greeting, and Ashley answers
+            # "I am good". Samantha answers in her own recorded
+            # voice — samantha_glad_youre_good.wav, Caitlin —
+            # and NVDA does not repeat it. Then, without Ashley
+            # having to ask, she reads the list of channels
+            # Ashley has, and what comes up next in the TV
+            # guide, so Ashley can tell her which channel she
+            # wants to watch. The list and the guide are read
+            # after the recorded reply finishes (about 6 sec),
+            # in the app's usual speaking voice, because
+            # Samantha's voice is recordings and cannot read
+            # channel names she never recorded — the same
+            # pattern as the TV guide in _speak_tv_guide.
+            self._play_sound_effect("samantha_glad_youre_good.wav")
+            msg = ("That's wonderful! I'm so glad you're doing "
+                   "good. What do you want to watch?")
+            self.status_label.SetLabel(msg)
+            wx.CallLater(6000, self._speak_channels_and_guide)
+            return
+        elif command == 'list_channels':
+            # "Samantha, list all the channels I have" — read
+            # them out, without opening the channel picker.
+            self._speak_channel_list()
+            return
         elif command == 'play_live_tv':
             # "Samantha, play live TV" - a favourite live channel
             # first, otherwise the first live channel.
@@ -4207,6 +4233,73 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(text)
         speak(text)
 
+    def _channel_file_names(self, channel_name):
+        """File names in one channel, without switching to it.
+
+        Uses that channel's cached playlist when it has one,
+        otherwise scans its folders once, the same way
+        _load_current_channel does for the current channel.
+        Files unmixed out of the channel stay out.
+        """
+        data = self.channels.channels.get(channel_name)
+        if not data:
+            return []
+        removed = set(data.get("mixed_files_removed") or [])
+        cached = data.get("cached_playlist")
+        if cached:
+            names = [str(fp) for _, fp in cached]
+        else:
+            folders = data.get("folders") or []
+            tmp = PlaylistManager()
+            try:
+                tmp.add_folders(folders)
+            except Exception:
+                return []
+            names = [str(fp) for _, fp in tmp.playlist]
+        if removed:
+            names = [n for n in names
+                     if self._show_base(n) not in
+                     {self._show_base(r) for r in removed}
+                     and n not in removed]
+        return names
+
+    @staticmethod
+    def _find_marathon_in_names(names, count=3):
+        """First show with 3 or more files in a row, or None.
+
+        Names are file names like "Friends - S01E01.mp3".
+        Returns the show name as written, e.g. "Friends".
+        """
+        if len(names) < count:
+            return None
+        for i in range(len(names) - count + 1):
+            run = names[i:i + count]
+            bases = [PlayerFrame._show_base(n) for n in run]
+            if len(set(bases)) == 1 and bases[0]:
+                return str(run[0]).split(" - ")[0].strip()
+        return None
+
+    def _marathons_in_other_channels(self):
+        """Marathons coming up on channels other than the current one.
+
+        Ashley, 2026-11-26: when Samantha tells her what comes
+        up next, she should say if it is a marathon of Classic
+        Doctor Who, or Two and a Half Men, or Friends, or
+        Frasier, or whatever channels she has — not only a
+        marathon on the channel playing right now. Returns a
+        list of (channel, show), at most 5, in channel order.
+        """
+        found = []
+        current = self.channels.current_channel
+        for name in self.channels.get_channel_list():
+            if name == current or len(found) >= 5:
+                continue
+            show = self._find_marathon_in_names(
+                self._channel_file_names(name))
+            if show:
+                found.append((name, show))
+        return found
+
     def _up_next_text(self):
         """The whole TV guide as one spoken text.
 
@@ -4260,7 +4353,42 @@ class PlayerFrame(wx.Frame):
                 parts.append(
                     f"That is the last one on {channel}. "
                     f"Coming up next: {nxt_ch}.")
+        # Ashley, 2026-11-26: marathons on her other channels
+        # too — Classic Doctor Who, Two and a Half Men, Friends,
+        # Frasier, or whatever channels she has — not only a
+        # marathon on the channel playing right now.
+        others = self._marathons_in_other_channels()
+        if others:
+            bits = [f"on {ch}, a marathon of {show}"
+                    for ch, show in others]
+            parts.append("Marathons coming up: " + "; ".join(bits) + ".")
         return " ".join(parts)
+
+    def _speak_channel_list(self):
+        """Read out all the channels Ashley has.
+
+        Ashley, 2026-11-26: after she says "I am good", Samantha
+        reads the list of channels, without Ashley having to ask
+        for it, so she can tell Samantha which channel she wants.
+        The names change as channels are added, so they are read
+        in the app's usual speaking voice — Samantha's voice is
+        recordings and cannot read new channel names she never
+        recorded — the same pattern as the TV guide.
+        """
+        channels = self.channels.get_channel_list()
+        if not channels:
+            msg = "No channels available. Press Ctrl+T to create one."
+        else:
+            names = ", ".join(channels)
+            msg = (f"Here are your channels: {names}. "
+                   "Tell me which one you want to watch.")
+        self.status_label.SetLabel(msg)
+        speak(msg)
+
+    def _speak_channels_and_guide(self):
+        """After "I'm good": channels list, then what's next."""
+        self._speak_channel_list()
+        self._speak_tv_guide()
 
     def _speak_tv_guide(self, event=None):
         """Read the whole TV guide out loud.

@@ -45,6 +45,19 @@ Samantha now speaks in her own recorded voice, not just NVDA. Her voice is frien
 - When you ask "what is your name", she answers in her own voice: "Hi, my name is Samantha. What is your name?"
 - Her voice files are in the sounds folder: samantha_greeting.wav (3.4 seconds) and samantha_what_to_watch.wav (1.6 seconds).
 
+## "I'm Good" — Samantha Answers, Then Lists Your Channels and What's Next
+
+Samantha asks "Hi Sweetie! How are you doing? What do you want to watch?" in her own voice when Audio Vault TV opens, and when she hears her wake word. Answer her by voice: press **Ctrl+Shift+B** and say "I'm good", or say "Samantha, I'm good" in wake-word mode.
+
+- Samantha answers in her own recorded voice: "That's wonderful! I'm so glad you're doing good. What do you want to watch?" Her voice file is sounds/samantha_glad_youre_good.wav. NVDA does not repeat it.
+- Then, without you having to ask, she reads the list of channels you have, so you can tell her which one you want to watch.
+- Then she tells you what comes up next in the TV guide — including marathons, for example "A marathon of Classic Doctor Who is coming up next", or a marathon of Two and a Half Men, Friends, or Frasier, on whatever channels you have.
+- Then tell her the channel you want, for example "play Friends" or "play Classic Doctor Who", and she will take you there.
+
+You can also ask for the list on its own, any time: "Samantha, list all the channels I have" or "what channels do I have".
+
+The channel names, and the show names in the guide, change as you add channels, so they are read in the app's usual speaking voice — Samantha's voice is recordings and cannot read new names she never recorded — the same pattern as the TV guide below.
+
 ## Live TV by Voice
 
 Samantha can play live channels, like Game Show Network and other channels. Live TV streams over the internet, so it does not need your external drive.
@@ -64,7 +77,7 @@ A plain show search does live shows too, as well as AudioVault search and downlo
 
 ## TV Guide - What Is Coming Up Next
 
-Samantha reads the whole TV guide: what is playing now, what comes up next in this channel, and what channel comes after this one. She says "Here's what's coming up next!" in her own recorded voice first, then the guide itself is read in the app's usual speaking voice, because Samantha's voice is recordings and she cannot read new show names she never recorded. When one show finishes and the next one starts, she also says what is coming up after that one, without you asking. Live TV has no programme schedule, only channel names, so the live guide names the live channel now and the next live channels after it.
+Samantha reads the whole TV guide: what is playing now, what comes up next in this channel, and what channel comes after this one. She says "Here's what's coming up next!" in her own recorded voice first, then the guide itself is read in the app's usual speaking voice, because Samantha's voice is recordings and she cannot read new show names she never recorded. When one show finishes and the next one starts, she also says what is coming up after that one, without you asking. The guide also names marathons coming up on your other channels, for example a marathon of Classic Doctor Who, Two and a Half Men, Friends, or Frasier, not only a marathon on the channel playing right now. Live TV has no programme schedule, only channel names, so the live guide names the live channel now and the next live channels after it.
 
 | Say This | Action |
 |----------|--------|
