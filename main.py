@@ -161,6 +161,11 @@ class PlayerFrame(wx.Frame):
         
         self.is_voice_listening = False
         self.wake_word_mode = False
+        # Ashley, 2026-11-26: the wake chimes were playing twice.
+        # This flag says the high+low chimes already played for
+        # this listening session, so they are not played again
+        # and the low chime is not repeated at the end.
+        self._wake_chimes_played = False
         self.wake_word_thread = None
         self.is_switching_channels = False  # Flag to prevent multiple channel switches
         self.vault_logged_in = False
@@ -1272,7 +1277,7 @@ class PlayerFrame(wx.Frame):
             # Stop listening
             self.voice.stop_listening()
             self.is_voice_listening = False
-            self._play_sound_effect("end_of_request.wav")
+            self._play_end_chime()
             msg = "Voice control stopped"
             self.status_label.SetLabel(msg)
             speak(msg)
@@ -1298,8 +1303,8 @@ class PlayerFrame(wx.Frame):
             text = self.voice.listen(
                 duration=getattr(self.voice, "ONE_TIME_LISTEN_SECONDS", 20))
             
-            # Play end sound
-            wx.CallAfter(self._play_sound_effect, "end_of_request.wav")
+            # Play end sound, once only (see _play_end_chime)
+            wx.CallAfter(self._play_end_chime)
             
             if text:
                 # Parse command
@@ -1313,6 +1318,13 @@ class PlayerFrame(wx.Frame):
             wx.CallAfter(self._voice_error, str(e))
         finally:
             self.is_voice_listening = False
+            # NOTE: do NOT clear _wake_chimes_played here. This
+            # finally runs in the listening thread, and the
+            # end chime is queued to the main thread with
+            # CallAfter — if the flag were cleared here first,
+            # the end chime would think the chimes never played
+            # and ring the low chime a second time. _play_end_chime
+            # (on the main thread) owns clearing the flag.
     
     def _execute_voice_command(self, command, text):
         """Execute a voice command"""
@@ -1579,6 +1591,10 @@ class PlayerFrame(wx.Frame):
     
     def _voice_error(self, error):
         """Handle voice recognition error"""
+        # Listening ended with an error, so no end chime was
+        # played — clear the chime flag so the next session
+        # can chime again.
+        self._wake_chimes_played = False
         msg = f"Voice error: {error}"
         self.status_label.SetLabel(msg)
         speak(msg)
@@ -1594,6 +1610,7 @@ class PlayerFrame(wx.Frame):
         if self.wake_word_mode:
             # Stop wake word mode
             self.wake_word_mode = False
+            self._wake_chimes_played = False
             self.voice.stop_listening()
             msg = "Wake word mode stopped"
             self.status_label.SetLabel(msg)
@@ -1654,13 +1671,13 @@ class PlayerFrame(wx.Frame):
     
     def _wake_word_command(self, text):
         """Handle command after wake word"""
-        self._play_sound_effect("end_of_request.wav")
+        self._play_end_chime()
         command = self.voice.parse_command(text)
         self._execute_voice_command(command, text)
     
     def _wake_word_no_command(self):
         """Handle no command after wake word"""
-        self._play_sound_effect("end_of_request.wav")
+        self._play_end_chime()
         # Honey, 2026-11-23 evening: if Samantha cannot hear
         # anything after the wake word, she says "Excuse me"
         # out loud and asks Honey to say it again.
@@ -2066,10 +2083,36 @@ class PlayerFrame(wx.Frame):
         15 seconds after a wake word — so the low chime at
         2 seconds does not cut her off; she still has plenty
         of time to speak.
+
+        Ashley, 2026-11-26: the chimes were playing twice, and
+        they are supposed to play once — once on the high,
+        once on the low. So if they already played for this
+        listening session, this does nothing. The low chime
+        is also the end-of-request sound, so _play_end_chime
+        skips it too once the chimes have played.
         """
+        if self._wake_chimes_played:
+            return
+        self._wake_chimes_played = True
         self._play_sound_effect("start_of_request.wav")
         wx.CallLater(2000, self._play_sound_effect,
                      "end_of_request.wav")
+
+    def _play_end_chime(self):
+        """End-of-request chime, once only.
+
+        The low chime (end_of_request.wav) already played as
+        part of the wake chimes 2 seconds after listening
+        started, so it is not played again at the end of the
+        request — that was the double. If the wake chimes did
+        not play for this session, the end chime plays as
+        before. Either way the flag is cleared, so the next
+        listening session can chime again.
+        """
+        if self._wake_chimes_played:
+            self._wake_chimes_played = False
+            return
+        self._play_sound_effect("end_of_request.wav")
     
     def _show_greeting_dialog(self):
         """Samantha-only greeting, no pop-up dialog.
