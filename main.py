@@ -197,6 +197,15 @@ class PlayerFrame(wx.Frame):
         # this listening session, so they are not played again
         # and the low chime is not repeated at the end.
         self._wake_chimes_played = False
+        # Ashley, 2026-11-26: after the startup greeting asks
+        # "How are you doing?", Samantha listens first and reads
+        # the channel list after her answer (or after silence).
+        # True while the startup list has not been read yet.
+        self._startup_list_pending = False
+        # "Excuse me" is said only once in a row in wake-word
+        # mode, so it does not keep repeating while she is not
+        # speaking. Cleared whenever a real command is heard.
+        self._excuse_me_said = False
         # NVDA quiet: True means she wants NVDA quiet while in
         # the app (the default). Ctrl+Shift+Q flips it. The
         # automatic enable only runs while this is True, so it
@@ -1434,6 +1443,11 @@ class PlayerFrame(wx.Frame):
             # Samantha's voice is recordings and cannot read
             # channel names she never recorded — the same
             # pattern as the TV guide in _speak_tv_guide.
+            # The startup list is read here instead (list and
+            # guide together), so the pending startup list is
+            # cleared and _voice_no_command will not read it
+            # a second time.
+            self._startup_list_pending = False
             self._play_sound_effect("samantha_glad_youre_good.wav")
             msg = ("That's wonderful! I'm so glad you're doing "
                    "good. What do you want to watch?")
@@ -1627,6 +1641,15 @@ class PlayerFrame(wx.Frame):
     
     def _voice_no_command(self):
         """Handle no command recognized"""
+        # Ashley, 2026-11-26: after the startup greeting she
+        # said nothing yet — do not say "Excuse me". The list
+        # of channels has not been read, so read it now (she
+        # still needs her options), and listen again after it
+        # so she can pick one. _startup_show_list clears the
+        # flag, so this only happens once.
+        if getattr(self, "_startup_list_pending", False):
+            self._startup_show_list()
+            return
         # Honey, 2026-11-23 evening: if Samantha cannot hear
         # anything, she says "Excuse me" and asks Honey to
         # say it again, instead of just "No command recognized".
@@ -1667,6 +1690,7 @@ class PlayerFrame(wx.Frame):
             # not only after Samantha is heard. Ashley, 2026-11-26:
             # high chime first, then the low chime 2 seconds later.
             self.wake_word_mode = True
+            self._excuse_me_said = False
             self._play_wake_chimes()
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
             # when wake-word mode starts, too. Ashley, 2026-11-26:
@@ -1717,18 +1741,28 @@ class PlayerFrame(wx.Frame):
     def _wake_word_command(self, text):
         """Handle command after wake word"""
         self._play_end_chime()
+        # A real command was heard, so a later "Excuse me"
+        # may be said again if Samantha stops hearing her.
+        self._excuse_me_said = False
         command = self.voice.parse_command(text)
         self._execute_voice_command(command, text)
     
     def _wake_word_no_command(self):
         """Handle no command after wake word"""
         self._play_end_chime()
-        # Honey, 2026-11-23 evening: if Samantha cannot hear
-        # anything after the wake word, she says "Excuse me"
-        # out loud and asks Honey to say it again.
+        # Ashley, 2026-11-26: "it also keeps on saying excuse
+        # me." In wake-word mode this runs every time a command
+        # window ends empty, so it repeated over and over while
+        # she was not speaking. Now "Excuse me" is said only
+        # once in a row — after that, Samantha stays quiet and
+        # keeps listening for the wake word. The flag clears
+        # whenever a real command is heard, or wake-word mode
+        # is started again.
         msg = "Excuse me, I didn't hear you. Could you say that again?"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        if not getattr(self, "_excuse_me_said", False):
+            self._excuse_me_said = True
+            speak(msg)
     
     def _check_channel_integrity(self):
         """Repair channels on startup instead of calling them corrupted.
@@ -2262,19 +2296,23 @@ class PlayerFrame(wx.Frame):
         then greet me and then ask me what channels and then
         name the channel lists and then that's it." So when the
         app opens (or she says hello), Samantha does exactly
-        that, one thing at a time, and then stops and waits
-        for Ashley to choose:
+        that, one thing at a time:
         1. "Audio Vault TV" in Samantha's own recorded voice
            (sounds/audio_vault_tv.wav, about 2 seconds).
         2. The greeting, "Hi Sweetie! How are you doing? What
            do you want to watch?" (about 5 seconds) — that is
            also the ask about what channels she wants.
-        3. The list of shows she has, read out so she can
-           choose ("Here are the shows you have: ... Tell me
-           which one you want to watch.").
-        Then that's it — listening starts only once the list
-        has finished being read, so her answer is heard and
-        Samantha's own reading is not heard as a command.
+        3. Samantha listens right away for her answer. If
+           Ashley says "I'm good", Samantha says "That's
+           wonderful" and then names the channels and what
+           comes up next. If she names a show, it plays. If
+           she says nothing, the channel list is read anyway
+           and Samantha listens again so she can pick one.
+           Listening starts as soon as the greeting finishes
+           because she answers "I'm good" right away — an
+           earlier version read the list first and only
+           listened after it, so her answer was never heard
+           and Samantha kept saying "Excuse me".
 
         NVDA kept saying "Greeting dialogue" (and "pane")
         when this pop-up opened, and she does not want NVDA
@@ -2298,24 +2336,38 @@ class PlayerFrame(wx.Frame):
         wx.CallLater(2200, self._startup_greeting)
 
     def _startup_greeting(self):
-        """Startup step 2: the greeting, then the channel list."""
+        """Startup step 2: the greeting, then listen for her answer.
+
+        Ashley, 2026-11-26: "It's not responding when I say
+        good." The greeting asks "How are you doing?", and she
+        answers "I'm good" right away — but nobody was listening
+        yet, because the channel list was read first and
+        listening only started after the list finished. Her
+        answer was lost, and after 20 seconds of silence
+        Samantha said "Excuse me, I didn't hear you." So now
+        Samantha listens as soon as the greeting finishes. If
+        Ashley answers "I'm good", Samantha says "That's
+        wonderful" and then reads the list and the guide
+        (see feeling_good). If she names a show, it plays.
+        If she says nothing, the list is read anyway (see
+        _voice_no_command) and Samantha listens again.
+        """
+        self._startup_list_pending = True
         self._play_sound_effect("samantha_how_are_you_doing.wav")
         self.status_label.SetLabel(
             "Hi Sweetie! How are you doing? What do you want to watch?")
-        # The greeting is about 5 seconds; wait for it to
-        # finish, plus a short pause, before the list.
-        wx.CallLater(5400, self._startup_show_list)
+        # The greeting is about 5 seconds; listen as soon as
+        # it finishes, so her answer is heard.
+        wx.CallLater(5400, self._listen_after_greeting)
 
     def _startup_show_list(self):
-        """Startup step 3: name the channels she has, then stop.
+        """Startup step 3: name the channels she has, then listen.
 
-        The list is read in the app's usual speaking voice
-        (Samantha's recordings cannot read new show names),
-        through _speak_and_requiet so Ashley hears it even
-        with NVDA quiet on. Listening starts only after the
-        list has finished, using the same reading-time
-        estimate, plus a second.
+        Used when she said nothing after the greeting: the list
+        is read so she still hears her options, and then
+        Samantha listens again so she can pick one.
         """
+        self._startup_list_pending = False
         self._speak_and_requiet(self._speak_show_list)
         words = len(str(self.status_label.GetLabel()).split())
         ms = int((words / 2.5 + 6) * 1000)

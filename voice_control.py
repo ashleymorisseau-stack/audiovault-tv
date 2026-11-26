@@ -78,7 +78,11 @@ class VoiceControl:
     WAKE_WORD_COMMAND_SECONDS = 15
     # After the first words are heard, keep listening this long for
     # more words, so a pause between words does not cut her off.
-    PAUSE_GRACE_SECONDS = 2.5
+    # Ashley, 2026-11-26: "make it so that it listens to every
+    # word I say" — she speaks slowly and pauses between words,
+    # and 2.5 seconds cut her off mid-sentence, so the rest of
+    # her words were lost and Samantha said "Excuse me".
+    PAUSE_GRACE_SECONDS = 4.0
 
     def __init__(self, model_path="vosk-model-small-en-us-0.15"):
         """Initialize voice recognition"""

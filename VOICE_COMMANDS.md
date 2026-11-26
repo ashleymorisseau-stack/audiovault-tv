@@ -99,13 +99,13 @@ When Samantha greets you at startup and asks how you are doing, she now starts l
 
 ## Startup — What Samantha Says When the App Opens
 
-When Audio Vault TV opens, Samantha does this, one thing at a time, in her own voice, and then stops and waits for you to choose:
+When Audio Vault TV opens, Samantha does this, one thing at a time, in her own voice:
 
 1. She says "Audio Vault TV" (sounds/audio_vault_tv.wav, her own recorded voice, about 2 seconds).
 2. She greets you: "Hi Sweetie! How are you doing? What do you want to watch?" — that is also her asking what channels you want.
-3. She names the channels you have: "Here are the shows you have: ..." and ends with "Tell me which one you want to watch."
+3. She listens right away for your answer. If you say "I'm good", she says "That's wonderful! I'm so glad you're doing good." and then names the channels you have and what comes up next. If you name a show, it plays. If you say nothing, she names the channels anyway and listens again so you can pick one.
 
-Then that's it. Listening starts only once the list has finished being read, so your answer is heard and her own reading is not heard as a command.
+Listening starts as soon as the greeting finishes, because you answer "I'm good" right away — an earlier version read the list first and only listened after it, so your answer was never heard and Samantha kept saying "Excuse me". She also waits longer between your words now (4 seconds instead of 2.5), so she hears every word even if you pause. And in wake-word mode she says "Excuse me" only once in a row, then stays quiet and keeps listening, instead of repeating it.
 
 When you choose one — "play Friends", "watch Classic Doctor Who" — she tells you plainly if you have it or not: "You have Friends. Now playing: Friends." or "You don't have a channel called ... , so I didn't change anything."
 
