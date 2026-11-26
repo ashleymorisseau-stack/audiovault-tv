@@ -5541,12 +5541,12 @@ class PlayerFrame(wx.Frame):
             pass
 
     def _schedule_edge_install_retry(self):
-        """Try the install again in 3 minutes, on a timer.
+        """Try the install again in 1 minute, on a timer.
 
         Ashley, 2026-11-26: a failed install used to sit
         there until she asked for the list again (or opened
         Command Prompt). Now the app retries by itself every
-        few minutes while the voice is not ready, so she
+        minute while the voice is not ready, so she
         only has to open the app and wait. Only one timer
         is ever scheduled at a time.
         """
@@ -5562,12 +5562,12 @@ class PlayerFrame(wx.Frame):
                 pass
         try:
             self._edge_install_retry_timer = wx.CallLater(
-                180000, self._edge_install_retry_tick)
+                60000, self._edge_install_retry_tick)
         except Exception:
             pass
 
     def _edge_install_retry_tick(self):
-        """The 3-minute retry timer fired: try again, once."""
+        """The 1-minute retry timer fired: try again, once."""
         self._edge_install_retry_timer = None
         if self._samantha_voice_mode() == "edge":
             return
@@ -5600,7 +5600,7 @@ class PlayerFrame(wx.Frame):
           for is read then — she does not have to ask again.
         - If a try fails, Samantha says "not ready" once for
           that failure (see _on_edge_install_failed), and the
-          app retries by itself every 3 minutes while the
+          app retries by itself every 1 minute while the
           voice is not ready — no asking again, no Command
           Prompt. A failed try is never cached as "not ready"
           for the run, and the pip error tail is written to
@@ -5669,13 +5669,19 @@ class PlayerFrame(wx.Frame):
     def _on_edge_install_ready(self):
         """The reading voice is ready (main thread).
 
-        If Ashley asked for a reading while it installed, read
-        it to her now — she should not have to ask again. If she
-        asked for the voice itself (menu / "install my reading
-        voice"), say so in the reading voice.
+        Ashley, 2026-11-26: "have her tell me when the
+        install is finished." So Samantha ALWAYS says so
+        now, in the reading voice itself, when the install
+        finishes — not only when Ashley asked for the voice
+        or for a list. If she asked for a reading while it
+        installed, read it to her now — she should not have
+        to ask again. Otherwise say plainly that the reading
+        voice is ready now, so she knows the moment it is
+        finished, right when she opens the program.
         """
         pending = getattr(self, "_pending_reading_text", None)
         self._pending_reading_text = None
+        self._edge_install_explicit = False
         # No more retries are needed once the voice is ready.
         timer = getattr(self, "_edge_install_retry_timer", None)
         if timer is not None:
@@ -5687,11 +5693,9 @@ class PlayerFrame(wx.Frame):
         if pending:
             self._say_in_samantha_voice(pending)
             return
-        if getattr(self, "_edge_install_explicit", False):
-            self._edge_install_explicit = False
-            self._say_in_samantha_voice(
-                "My reading voice is ready now. "
-                "Ask me to list your shows.")
+        self._say_in_samantha_voice(
+            "My reading voice is ready now. "
+            "Ask me to list your shows.")
 
     def _on_edge_install_failed(self):
         """The install failed (main thread).
@@ -5701,7 +5705,7 @@ class PlayerFrame(wx.Frame):
         then ask me again." — once for this failure, whether
         or not she was waiting for a reading. She does NOT
         just go silent afterwards: the app also schedules
-        another try by itself in 3 minutes (see
+        another try by itself in 1 minute (see
         _schedule_edge_install_retry), so Ashley does not
         have to ask again or open Command Prompt. Never NVDA,
         never Microsoft. The pending reading (if any) is kept
@@ -5711,7 +5715,7 @@ class PlayerFrame(wx.Frame):
         self._edge_install_explicit = False
         pending = getattr(self, "_pending_reading_text", None)
         self._pending_reading_text = None
-        # Retry by itself in 3 minutes, even if she says
+        # Retry by itself in 1 minute, even if she says
         # nothing — this is what makes Command Prompt
         # unnecessary.
         self._schedule_edge_install_retry()
@@ -5742,7 +5746,7 @@ class PlayerFrame(wx.Frame):
         runs in the background, and when it is ready she says
         so in the reading voice; if it fails she says her
         reading voice isn't ready yet, and the app retries by
-        itself in 3 minutes. An explicit ask always forces a
+        itself in 1 minute. An explicit ask always forces a
         fresh try right now, even if a try just failed a
         moment ago — it is not held back by the 60-second gap
         between automatic tries. If the voice is already
