@@ -97,9 +97,9 @@ When you ask Samantha "can you hear me", "do you hear me", or "are you listening
 
 When Samantha greets you at startup and asks how you are doing, she now starts listening right after the greeting, so when you answer "I'm good" she actually hears it — before, nobody was listening until you pressed Ctrl+Shift+B or said a wake word. After her recorded reply, she reads your shows and what's coming up next. That list and guide were going silent when NVDA quiet was on, because they are read through NVDA and NVDA was quiet — so now NVDA quiet turns off just for that reading, and back on again after it finishes.
 
-## Wake Chimes — Steadier
+## Wake Chimes — High, Then Low Two Seconds Later
 
-The wake chimes (sounds/start_of_request.wav and sounds/end_of_request.wav) were levelled so they play at a steadier volume, same length as before. The start bell also no longer rings twice when you call Samantha — it rings once when wake-word mode starts, and then Samantha just answers "Yes?" in her own voice.
+When Samantha starts listening — Ctrl+Shift+B or Ctrl+Shift+W — you hear the high chime first (sounds/start_of_request.wav, one long high C), then two seconds later the low chime (sounds/end_of_request.wav, medium G to medium C). Your own chimes, nothing new. Listening stays open the whole time — 20 seconds one time, 15 seconds after a wake word — so the low chime does not cut you off; you still have plenty of time to speak. The chimes were also levelled so they play at a steadier volume, same length as before. The start bell no longer rings twice when you call Samantha — it rings once when wake-word mode starts, and then Samantha just answers "Yes?" in her own voice.
 
 ## Live TV by Voice
 

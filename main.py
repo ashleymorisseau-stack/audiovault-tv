@@ -1280,8 +1280,10 @@ class PlayerFrame(wx.Frame):
             # Start listening in a separate thread
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
             # when she starts listening, so Honey knows she is ready.
+            # Ashley, 2026-11-26: high chime, then the low chime
+            # 2 seconds later, and she still has 20 seconds to speak.
             self.is_voice_listening = True
-            self._play_sound_effect("start_of_request.wav")
+            self._play_wake_chimes()
             msg = "I'm listening"
             self.status_label.SetLabel(msg)
             speak(msg)
@@ -1600,11 +1602,10 @@ class PlayerFrame(wx.Frame):
             # Start wake word mode
             # Honey asked 2026-11-23: the start bell should ring on the
             # call button, as soon as she calls Samantha with Ctrl+Shift+W,
-            # not only after Samantha is heard. So play it here, when wake
-            # word mode starts. _wake_word_detected still plays it again
-            # when Samantha is actually heard, so she knows Samantha is listening.
+            # not only after Samantha is heard. Ashley, 2026-11-26:
+            # high chime first, then the low chime 2 seconds later.
             self.wake_word_mode = True
-            self._play_sound_effect("start_of_request.wav")
+            self._play_wake_chimes()
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
             # when wake-word mode starts, too. Ashley, 2026-11-26:
             # she answers to Samantha, Sam, Sammy, Guide, or Metro.
@@ -2052,6 +2053,23 @@ class PlayerFrame(wx.Frame):
                 sound.play()
             except Exception as e:
                 print(f"Could not play sound effect {filename}: {e}")
+
+    def _play_wake_chimes(self):
+        """Wake chimes: high chime first, low chime 2 seconds later.
+
+        Ashley, 2026-11-26: "make it go on the high chime and
+        then two seconds later have it on a low chime" — using
+        the chimes she already has, nothing new. The high chime
+        is start_of_request.wav (one long high C), the low chime
+        is end_of_request.wav (medium G to medium C). Listening
+        stays open the whole time — 20 seconds one-time,
+        15 seconds after a wake word — so the low chime at
+        2 seconds does not cut her off; she still has plenty
+        of time to speak.
+        """
+        self._play_sound_effect("start_of_request.wav")
+        wx.CallLater(2000, self._play_sound_effect,
+                     "end_of_request.wav")
     
     def _show_greeting_dialog(self):
         """Samantha-only greeting, no pop-up dialog.
