@@ -237,6 +237,14 @@ class PlayerFrame(wx.Frame):
         # listening herself (Ctrl+Shift+B) or starts wake-word
         # mode, which has its own loop.
         self._want_continuous = False
+        # True while Samantha is reading something out loud
+        # (show list, guide) in her reading voice, so the
+        # automatic re-arm waits instead of listening to her
+        # own reading as if it were a command.
+        self._samantha_reading = False
+        # Cached result of _samantha_voice_mode(): "edge",
+        # "sapi", or None. None until first checked.
+        self._samantha_voice_mode_cache = "unset"
         # Ashley, 2026-11-26: the wake chimes were playing twice.
         # This flag says the high+low chimes already played for
         # this listening session, so they are not played again
@@ -1409,7 +1417,13 @@ class PlayerFrame(wx.Frame):
         """Listen again after a command, so Samantha responds
         every time Ashley asks something, without her having to
         press Ctrl+Shift+B again. Only re-arms while continuous
-        listening is wanted and nothing else is listening."""
+        listening is wanted and nothing else is listening. If
+        Samantha is still reading something out loud, wait and
+        try again in a few seconds, so listening does not hear
+        her own reading as if it were a command."""
+        if getattr(self, "_samantha_reading", False):
+            wx.CallLater(5000, self._rearm_listening)
+            return
         if not getattr(self, "_want_continuous", False):
             return
         if not self.voice_available:
@@ -1637,7 +1651,8 @@ class PlayerFrame(wx.Frame):
                 msg = (f"You don't have a channel called {query}, "
                        "so I didn't change anything.")
             self.status_label.SetLabel(msg)
-            self._speak_and_requiet(lambda: speak(msg))
+            self._speak_and_requiet(
+                lambda: self._say_in_samantha_voice(msg))
             return
         elif command == 'play_pause':
             self._toggle_play_pause()
@@ -4835,9 +4850,8 @@ class PlayerFrame(wx.Frame):
         reads the list of channels, without Ashley having to ask
         for it, so she can tell Samantha which channel she wants.
         The names change as channels are added, so they are read
-        in the app's usual speaking voice — Samantha's voice is
-        recordings and cannot read new channel names she never
-        recorded — the same pattern as the TV guide.
+        in Samantha's reading voice (see _say_in_samantha_voice),
+        not NVDA's — NVDA stays quiet.
         """
         channels = self.channels.get_channel_list()
         if not channels:
@@ -4847,23 +4861,161 @@ class PlayerFrame(wx.Frame):
             msg = (f"Here are your channels: {names}. "
                    "Tell me which one you want to watch.")
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._say_in_samantha_voice(msg)
+
+    def _samantha_voice_mode(self):
+        """Which voice can read dynamic text out loud, if any.
+
+        Ashley, 2026-11-26: "I want her to have the list of
+        shows. I don't want NVDA reading that list of shows.
+        I want her to." Samantha's recorded voice cannot read
+        show names she never recorded, so dynamic text needs
+        a reading voice that can say any words:
+        - "edge": the edge-tts library is installed, so text
+          is spoken with a warm female neural voice
+          (en-US-AriaNeural) over the internet. Fart Wars
+          already uses Edge TTS on this PC.
+        - "sapi": Windows' own speech (System.Speech, built
+          into Windows, no install), female desktop voice
+          (Microsoft Zira Desktop when present).
+        - None: neither is available; readings fall back to
+          NVDA speak(), as before.
+        The result is cached for the run. Honest note: Ashley
+        has not heard the Aria or Zira reading voice yet — no
+        sample could be made from here — so if she does not
+        like it, the voice name is the one line to change.
+        """
+        cached = getattr(self, "_samantha_voice_mode_cache", "unset")
+        if cached != "unset":
+            return cached
+        mode = None
+        try:
+            import edge_tts  # noqa: F401
+            mode = "edge"
+        except Exception:
+            mode = None
+        if mode is None and os.name == "nt":
+            mode = "sapi"
+        self._samantha_voice_mode_cache = mode
+        return mode
+
+    def _say_in_samantha_voice(self, text):
+        """Read dynamic text in a Samantha-like voice, not NVDA's.
+
+        Used for the show list, the channel list, the TV guide,
+        and the "you have it / you don't have it" answer — the
+        readings Ashley asked Samantha herself to do. NVDA
+        quiet stays on the whole time, so NVDA says nothing.
+        Returns after starting the reading (it plays in the
+        background); the _samantha_reading flag stays up while
+        it plays so listening does not hear Samantha's own
+        voice as a command. Falls back to NVDA speak() when
+        no reading voice is available.
+        """
+        if not text:
+            return
+        mode = self._samantha_voice_mode()
+        if mode == "edge":
+            threading.Thread(target=self._edge_tts_read,
+                             args=(text,), daemon=True).start()
+            return
+        if mode == "sapi":
+            threading.Thread(target=self._sapi_read,
+                             args=(text,), daemon=True).start()
+            return
+        speak(text)
+
+    def _edge_tts_read(self, text):
+        """Synthesize text with Edge TTS and play it (thread)."""
+        try:
+            import asyncio
+            import edge_tts
+            path = str(Path(tempfile.gettempdir())
+                       / f"samantha_read_{int(time.time() * 1000) % 100000}.mp3")
+            self._samantha_reading = True
+            asyncio.run(
+                edge_tts.Communicate(text, "en-US-AriaNeural").save(path))
+            words = len(str(text).split())
+            wx.CallAfter(self._play_dynamic_wav, path, words)
+        except Exception:
+            # Edge TTS failed (no internet, library problem):
+            # fall back to Windows speech, then to NVDA.
+            self._samantha_reading = False
+            if os.name == "nt":
+                self._sapi_read(text)
+            else:
+                wx.CallAfter(speak, text)
+
+    def _sapi_read(self, text):
+        """Speak text with Windows' built-in speech (thread).
+
+        PowerShell System.Speech is part of Windows — no
+        install. Female desktop voice (Microsoft Zira Desktop)
+        when present, otherwise the default voice. Speak()
+        blocks the thread, not the app, until it finishes.
+        """
+        try:
+            self._samantha_reading = True
+            safe = str(text).replace("'", "''")
+            ps = (
+                "Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                "$z = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Name -like '*Zira*' } | Select-Object -First 1; "
+                "if ($z) { $s.SelectVoice($z.VoiceInfo.Name) }; "
+                f"$s.Speak('{safe}') | Out-Null"
+            )
+            import subprocess
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                capture_output=True, timeout=120,
+                startupinfo=startupinfo)
+        except Exception:
+            wx.CallAfter(speak, text)
+        finally:
+            self._samantha_reading = False
+
+    def _play_dynamic_wav(self, path, words):
+        """Play a synthesized reading file, then delete it."""
+        try:
+            import pygame
+            pygame.mixer.init()
+            sound = pygame.mixer.Sound(path)
+            sound.play()
+        except Exception:
+            pass
+        # Reading takes about 150 words a minute; clear the
+        # flag and delete the file once it should be done.
+        ms = int((words / 2.5 + 2) * 1000)
+        wx.CallLater(ms, self._finish_dynamic_wav, path)
+
+    def _finish_dynamic_wav(self, path):
+        """Mark a dynamic reading done and delete its file."""
+        self._samantha_reading = False
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
 
     def _speak_and_requiet(self, speak_fn):
-        """Run speak_fn (which speaks through NVDA), making sure
-        Ashley actually hears it even with NVDA quiet on, then
-        quiet again.
+        """Run speak_fn, making sure Ashley actually hears it.
 
-        Ashley, 2026-11-26: "I'm good" was not working — after
-        Samantha's recorded reply, the shows list and the guide
-        went through speak(), which is silent while NVDA quiet
-        mode is on, so she heard nothing. The list and guide
-        have to be heard through NVDA (Samantha's recordings
-        cannot read new show names), so quiet is turned off
-        just for the reading, then back on after NVDA has had
-        time to read it (about 150 words a minute, plus a
-        few seconds for Samantha's recorded intro).
+        Ashley, 2026-11-26: she wants Samantha herself to read
+        the list, not NVDA. When a Samantha reading voice is
+        available (see _samantha_voice_mode), speak_fn reads
+        through it and NVDA quiet stays on the whole time —
+        NVDA says nothing at all. Only when no reading voice
+        is available does quiet turn off just for the reading
+        through NVDA, then back on after NVDA has had time to
+        read it (about 150 words a minute, plus a few seconds
+        for Samantha's recorded intro).
         """
+        if self._samantha_voice_mode() is not None:
+            speak_fn()
+            return
         was_quiet = _NVDA_QUIET
         if was_quiet:
             set_nvda_quiet(False)
@@ -4884,9 +5036,9 @@ class PlayerFrame(wx.Frame):
         Two and a Half Men, Frasier, and so on — not just
         channel names, because a channel can hold a show
         under a slightly different name. The names change
-        as she adds shows, so they are read in the app's
-        usual speaking voice, the same pattern as the TV
-        guide. After the list, she can say the show she
+        as she adds shows, so they are read in Samantha's
+        reading voice (see _say_in_samantha_voice), not
+        NVDA's. After the list, she can say the show she
         wants, for example "play Friends".
         """
         seen = {}
@@ -4906,18 +5058,23 @@ class PlayerFrame(wx.Frame):
             msg = (f"Here are the shows you have: {', '.join(shows)}. "
                    "Tell me which one you want to watch.")
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._say_in_samantha_voice(msg)
 
     def _speak_channels_and_guide(self):
         """After "I'm good": shows list, then what's next.
 
-        Ashley, 2026-11-26: this was silent with NVDA quiet
-        on, because both readings go through speak(). So
-        quiet is turned off for the whole reading and back
-        on once, after both the list and the guide, using
-        their combined word count — not once per reading,
-        or the guide would be cut off halfway.
+        When Samantha has a reading voice, both readings go
+        through it and NVDA quiet stays on — NVDA says
+        nothing. Only without a reading voice is quiet turned
+        off for the whole reading and back on once, after both
+        the list and the guide, using their combined word
+        count — not once per reading, or the guide would be
+        cut off halfway.
         """
+        if self._samantha_voice_mode() is not None:
+            self._speak_show_list()
+            self._speak_tv_guide()
+            return
         was_quiet = _NVDA_QUIET
         if was_quiet:
             set_nvda_quiet(False)
@@ -4935,15 +5092,14 @@ class PlayerFrame(wx.Frame):
 
         Samantha says "Here's what's coming up next!" in her
         own recorded voice first, then the guide itself - the
-        show names, which change every time - is read in the
-        app's usual speaking voice, because Samantha's voice
-        is recordings and cannot read new show names she never
-        recorded.
+        show names, which change every time - is read in
+        Samantha's reading voice (see _say_in_samantha_voice),
+        not NVDA's.
         """
         self._play_sound_effect("samantha_coming_up_next.wav")
         text = self._up_next_text()
         self.status_label.SetLabel(text)
-        speak(text)
+        self._say_in_samantha_voice(text)
 
     def _on_tv_guide(self, event=None):
         """Menu / Ctrl+Shift+G: read the TV guide.
