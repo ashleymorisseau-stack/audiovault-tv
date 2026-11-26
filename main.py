@@ -266,8 +266,28 @@ class PlayerFrame(wx.Frame):
         # Cached result of _samantha_voice_mode(): "edge" or
         # None. None until first checked.
         self._samantha_voice_mode_cache = "unset"
+        # Reading-voice install state — ALL of it is defined
+        # BEFORE the install thread below is started. Ashley,
+        # 2026-11-26: the thread used to start first and these
+        # attributes were set after it, so if the thread ran
+        # first it saw _edge_install_lock as None and returned
+        # silently — no install ever happened, and Samantha
+        # just kept saying "not ready". Nothing below may be
+        # moved after the thread start.
+        self._edge_install_state = "unknown"
+        self._edge_install_running = False
+        self._edge_install_lock = threading.Lock()
+        self._edge_install_last_try = 0.0
+        self._edge_install_fail_count = 0
+        self._edge_install_not_ready_said = 0
+        self._edge_install_explicit = False
+        self._pending_reading_text = None
+        self._edge_install_retry_timer = None
+        self._edge_install_started_announced = False
         # Get Samantha's reading voice ready in the background
-        # (installs edge-tts once a day if it is missing).
+        # (installs edge-tts itself if it is missing, and
+        # retries on its own if a try fails — Ashley never
+        # has to use Command Prompt for it).
         threading.Thread(target=self._ensure_edge_tts,
                          daemon=True).start()
         # Ashley, 2026-11-26: the wake chimes were playing twice.
@@ -285,14 +305,8 @@ class PlayerFrame(wx.Frame):
         self._pending_voice_command_timer = None
         self._last_typed_command = None
         self._last_typed_command_at = 0.0
-        self._edge_install_state = "unknown"
-        self._edge_install_running = False
-        self._edge_install_lock = threading.Lock()
-        self._edge_install_last_try = 0.0
-        self._edge_install_fail_count = 0
-        self._edge_install_not_ready_said = 0
-        self._edge_install_explicit = False
-        self._pending_reading_text = None
+        # (Reading-voice install state lives above, before the
+        # startup install thread — see the note there.)
         # Ashley, 2026-11-26: after the startup greeting asks
         # "How are you doing?", Samantha listens first and reads
         # the channel list after her answer (or after silence).
@@ -5291,15 +5305,34 @@ class PlayerFrame(wx.Frame):
         """Mark Samantha's reading finished (queue callback)."""
         self._samantha_reading = False
 
-    def _edge_import_ok(self):
-        """True when the reading-voice library imports right now."""
+    def _edge_import_ok(self, force_recheck=False):
+        """True when the reading-voice library imports right now.
+
+        With force_recheck=True (used right after a pip
+        install), drop any cached copy first and clear the
+        import caches, so a library that pip has just put on
+        disk is really found in this same process — a plain
+        `import edge_tts` after a failed import can otherwise
+        keep answering from the old, failed attempt instead
+        of seeing the newly installed files.
+        """
+        if force_recheck:
+            try:
+                sys.modules.pop("edge_tts", None)
+            except Exception:
+                pass
+            try:
+                import importlib
+                importlib.invalidate_caches()
+            except Exception:
+                pass
         try:
             import edge_tts  # noqa: F401
             return True
         except Exception:
             return False
 
-    def _edge_install_should_retry(self):
+    def _edge_install_should_retry(self, force=False):
         """True when a new install attempt may start.
 
         Never while one is already running (the old code could
@@ -5307,9 +5340,14 @@ class PlayerFrame(wx.Frame):
         from asking for the list — and they fought each other),
         and not within a minute of the last try, so asking
         three times in a row does not start three installs.
+        force=True (an explicit "install my reading voice")
+        skips the 60-second gap — she asked for it now — but
+        still never starts a second install while one runs.
         """
         if getattr(self, "_edge_install_running", False):
             return False
+        if force:
+            return True
         try:
             last = float(getattr(self, "_edge_install_last_try", 0) or 0)
         except Exception:
@@ -5452,38 +5490,136 @@ class PlayerFrame(wx.Frame):
                          ["samantha_reading_not_ready.wav"],
                          after=self._clear_samantha_reading)
 
-    def _ensure_edge_tts(self):
+    def _run_pip_install_edge_tts(self, extra_args):
+        """One pip try for edge-tts; returns (ok, error_tail).
+
+        Uses this app's own Python (sys.executable), so it
+        installs into the same Python the app is running in
+        — a `python -m pip install` typed in Command Prompt
+        can land in a different Python. --disable-pip-version-check
+        keeps pip from spending time (and failing) on checking
+        for a newer pip first. No window is shown on Windows.
+        Each try gets 300 seconds.
+        """
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        else:
+            startupinfo = None
+        cmd = [sys.executable, "-m", "pip", "install",
+               "--disable-pip-version-check"] + list(extra_args) \
+            + ["edge-tts"]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300,
+                startupinfo=startupinfo)
+            ok = result.returncode == 0
+            tail = ((result.stderr or result.stdout or "")
+                    .strip().splitlines()[-5:])
+            return ok, tail
+        except subprocess.TimeoutExpired:
+            return False, ["pip install edge-tts timed out after 5 minutes"]
+        except Exception as e:
+            return False, [f"could not run pip: {e}"]
+
+    def _announce_edge_install_started(self):
+        """Samantha says she is installing her reading voice.
+
+        Queued behind anything already playing (the startup
+        greeting), in her own recorded voice — "I'm on it" —
+        so Ashley hears the install is actually happening
+        instead of wondering in silence. Said once per try.
+        """
+        if getattr(self, "_edge_install_state", None) != "installing":
+            return
+        if getattr(self, "_edge_install_started_announced", False):
+            return
+        self._edge_install_started_announced = True
+        try:
+            self._queue_samantha_sound("samantha_im_on_it.wav")
+        except Exception:
+            pass
+
+    def _schedule_edge_install_retry(self):
+        """Try the install again in 3 minutes, on a timer.
+
+        Ashley, 2026-11-26: a failed install used to sit
+        there until she asked for the list again (or opened
+        Command Prompt). Now the app retries by itself every
+        few minutes while the voice is not ready, so she
+        only has to open the app and wait. Only one timer
+        is ever scheduled at a time.
+        """
+        if getattr(self, "_samantha_voice_mode_cache", None) == "edge":
+            return
+        if getattr(self, "_edge_install_state", None) == "ready":
+            return
+        timer = getattr(self, "_edge_install_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        try:
+            self._edge_install_retry_timer = wx.CallLater(
+                180000, self._edge_install_retry_tick)
+        except Exception:
+            pass
+
+    def _edge_install_retry_tick(self):
+        """The 3-minute retry timer fired: try again, once."""
+        self._edge_install_retry_timer = None
+        if self._samantha_voice_mode() == "edge":
+            return
+        if getattr(self, "_edge_install_running", False):
+            self._schedule_edge_install_retry()
+            return
+        threading.Thread(target=self._ensure_edge_tts,
+                         daemon=True).start()
+
+    def _ensure_edge_tts(self, force=False):
         """Get Samantha's reading voice ready, in the background.
 
         Ashley, 2026-11-26: she kept hearing "My reading voice
         isn't ready yet" instead of the list, and she does not
-        know how to get that voice set up. The old code ran a
-        silent `python -m pip install edge-tts` once at startup
-        and never told her anything: if it was still running
-        when she asked, if it failed, or if it had already
-        failed, she just heard "not ready" again, with no
-        retry and no way to check. Now:
+        know how to get that voice set up — and she should
+        never have to use Command Prompt for it. The install
+        the app does itself:
         - If edge-tts already imports, nothing is installed at
           all — the old code re-ran pip on nearly every start.
-        - Only one install ever runs at a time, and a failed
-          try is logged (last lines of pip's own error) instead
-          of vanishing.
-        - An install that finishes is verified by importing
-          edge-tts again; only then does it count as ready.
-        - While it installs, asking for the list says "I'm on
-          it" and the list is read when the voice is ready (see
-          _say_in_samantha_voice). When it fails, Samantha says
-          "not ready" once for that failure, and the next ask
-          tries again.
-        - One manual step, if the background install keeps
-          failing: open Command Prompt in the Audio Vault TV
-          folder and run `python -m pip install edge-tts`,
-          then close and reopen Audio Vault TV. No NVDA and no
-          Microsoft voice is ever used instead.
+        - The startup thread used to start before the install
+          lock even existed, so it could return silently and
+          no install ever happened. The lock is now defined
+          before the thread starts, and if it is somehow
+          missing here a lock is created instead of returning
+          silently.
+        - Samantha says "I'm on it" in her own recorded voice
+          while it installs, so Ashley hears it happening.
+          When it is ready she says so in the reading voice
+          (see _on_edge_install_ready), and any list she asked
+          for is read then — she does not have to ask again.
+        - If a try fails, Samantha says "not ready" once for
+          that failure (see _on_edge_install_failed), and the
+          app retries by itself every 3 minutes while the
+          voice is not ready — no asking again, no Command
+          Prompt. A failed try is never cached as "not ready"
+          for the run, and the pip error tail is written to
+          the app log (mp3_player_log.txt, "EDGE-TTS install
+          failed: ...") instead of vanishing.
+        - pip is tried twice per attempt: first normally, then
+          once with --user (a per-user install, which works
+          when the normal one is blocked by permissions).
+          An install only counts as ready after edge-tts is
+          re-imported in this same process (see
+          _edge_import_ok(force_recheck=True)). No NVDA and
+          no Microsoft voice is ever used instead.
+        force=True (an explicit "install my reading voice")
+        skips the 60-second gap between tries.
         """
         lock = getattr(self, "_edge_install_lock", None)
         if lock is None:
-            return
+            lock = threading.Lock()
+            self._edge_install_lock = lock
         with lock:
             if getattr(self, "_edge_install_running", False):
                 return
@@ -5497,33 +5633,27 @@ class PlayerFrame(wx.Frame):
                 wx.CallAfter(self._on_edge_install_ready)
                 return
             self._edge_install_state = "installing"
+            self._edge_install_started_announced = False
             self._edge_install_last_try = time.time()
-            if os.name == "nt":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            else:
-                startupinfo = None
-            try:
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "edge-tts"],
-                    capture_output=True, text=True, timeout=300,
-                    startupinfo=startupinfo)
-                pip_ok = result.returncode == 0
-                pip_tail = ((result.stderr or result.stdout or "")
-                            .strip().splitlines()[-5:])
-            except subprocess.TimeoutExpired:
-                pip_ok = False
-                pip_tail = ["pip install edge-tts timed out after 5 minutes"]
-            except Exception as e:
-                pip_ok = False
-                pip_tail = [f"could not run pip: {e}"]
-            if pip_ok and self._edge_import_ok():
+            wx.CallAfter(self._announce_edge_install_started)
+            pip_ok, pip_tail = self._run_pip_install_edge_tts([])
+            if not (pip_ok and self._edge_import_ok(force_recheck=True)):
+                # The normal install did not work (or pip said
+                # it worked but the library still does not
+                # import): try once per-user before giving up.
+                pip_ok2, pip_tail2 = self._run_pip_install_edge_tts(
+                    ["--user"])
+                pip_tail = pip_tail + pip_tail2
+                pip_ok = pip_ok2
+            if pip_ok and self._edge_import_ok(force_recheck=True):
                 self._edge_install_state = "ready"
                 self._samantha_voice_mode_cache = "edge"
+                self._edge_install_started_announced = False
                 self._write_edge_flag(True)
                 wx.CallAfter(self._on_edge_install_ready)
                 return
             self._edge_install_state = "failed"
+            self._edge_install_started_announced = False
             self._edge_install_fail_count = \
                 getattr(self, "_edge_install_fail_count", 0) + 1
             self._write_edge_flag(False)
@@ -5546,6 +5676,14 @@ class PlayerFrame(wx.Frame):
         """
         pending = getattr(self, "_pending_reading_text", None)
         self._pending_reading_text = None
+        # No more retries are needed once the voice is ready.
+        timer = getattr(self, "_edge_install_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        self._edge_install_retry_timer = None
         if pending:
             self._say_in_samantha_voice(pending)
             return
@@ -5558,15 +5696,35 @@ class PlayerFrame(wx.Frame):
     def _on_edge_install_failed(self):
         """The install failed (main thread).
 
-        If Ashley is waiting for a reading, say "not ready" once
-        for this failure, in her own recorded voice — never NVDA,
-        never Microsoft. Otherwise stay quiet: the next time she
-        asks, she will hear it once, and a new try will start.
+        Samantha says so herself, in her own recorded voice —
+        "My reading voice isn't ready yet. Give me a moment,
+        then ask me again." — once for this failure, whether
+        or not she was waiting for a reading. She does NOT
+        just go silent afterwards: the app also schedules
+        another try by itself in 3 minutes (see
+        _schedule_edge_install_retry), so Ashley does not
+        have to ask again or open Command Prompt. Never NVDA,
+        never Microsoft. The pending reading (if any) is kept
+        out of the way — it will be asked for again, or the
+        retry will make the voice ready first.
         """
         self._edge_install_explicit = False
         pending = getattr(self, "_pending_reading_text", None)
         self._pending_reading_text = None
+        # Retry by itself in 3 minutes, even if she says
+        # nothing — this is what makes Command Prompt
+        # unnecessary.
+        self._schedule_edge_install_retry()
         if pending:
+            self._edge_install_not_ready_said = \
+                getattr(self, "_edge_install_fail_count", 0)
+            self._samantha_reading = True
+            self._play_samantha_sequence(
+                ["samantha_reading_not_ready.wav"],
+                after=self._clear_samantha_reading)
+            return
+        if (getattr(self, "_edge_install_not_ready_said", 0)
+                != getattr(self, "_edge_install_fail_count", 0)):
             self._edge_install_not_ready_said = \
                 getattr(self, "_edge_install_fail_count", 0)
             self._samantha_reading = True
@@ -5583,15 +5741,26 @@ class PlayerFrame(wx.Frame):
         step in the app: Samantha says "I'm on it", the install
         runs in the background, and when it is ready she says
         so in the reading voice; if it fails she says her
-        reading voice isn't ready yet. If it keeps failing, the
-        one manual step is: Command Prompt in the Audio Vault TV
-        folder, `python -m pip install edge-tts`, then close and
-        reopen Audio Vault TV.
+        reading voice isn't ready yet, and the app retries by
+        itself in 3 minutes. An explicit ask always forces a
+        fresh try right now, even if a try just failed a
+        moment ago — it is not held back by the 60-second gap
+        between automatic tries. If the voice is already
+        ready, she just says so instead of installing again.
+        No Command Prompt step is needed for any of this.
         """
+        if self._samantha_voice_mode() == "edge":
+            self._edge_install_explicit = False
+            self._say_in_samantha_voice(
+                "My reading voice is ready now. "
+                "Ask me to list your shows.")
+            return
         self._edge_install_explicit = True
+        self._edge_install_last_try = 0.0
         self.status_label.SetLabel("Getting Samantha's reading voice ready...")
         self._play_sound_effect("samantha_im_on_it.wav")
-        threading.Thread(target=self._ensure_edge_tts, daemon=True).start()
+        threading.Thread(target=self._ensure_edge_tts, args=(True,),
+                         daemon=True).start()
 
     def _play_dynamic_wav(self, path, words, _retry=0):
         """Play a synthesized reading file, then delete it.
