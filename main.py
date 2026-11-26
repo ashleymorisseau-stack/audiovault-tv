@@ -410,6 +410,14 @@ class PlayerFrame(wx.Frame):
                 self._next_channel()
         elif keycode == ord('Q') and ctrl and shift:
             self._on_toggle_nvda_quiet()
+        elif keycode == ord('G') and ctrl and shift:
+            # Ashley, 2026-11-26: Ctrl+Shift+G is the new
+            # NVDA-quiet toggle she asked for. Ctrl+Shift+Q
+            # still works too. (Her "Control Shift NVDA G"
+            # wording would add the NVDA key on top, which
+            # NVDA itself already uses for sleep mode, so
+            # the app toggle is Ctrl+Shift+G.)
+            self._on_toggle_nvda_quiet()
         elif keycode == ord('B') and ctrl and shift:
             self._toggle_voice_listening()
         elif keycode == ord('W') and ctrl and shift:
@@ -1335,11 +1343,15 @@ class PlayerFrame(wx.Frame):
             msg = ("Okay, I've forgotten your name. Tell me again any "
                    "time, just say my name is Honey.")
         elif command == 'what_is_your_name':
-            # Honey, 2026-11-23 evening: Samantha greets in her
-            # own recorded voice, and NVDA does not repeat the
-            # greeting, so Honey only hears Samantha.
-            self._play_sound_effect("samantha_greeting.wav")
-            msg = "My name is Samantha. I'm your voice helper for Audio Vault TV."
+            # Ashley, 2026-11-26: her full name is Samantha
+            # Hernandez Right — first Samantha, middle Hernandez,
+            # last Right. She is still called Samantha.
+            # Samantha says it in her own recorded voice
+            # (sounds/samantha_my_name_is.wav), and NVDA does
+            # not repeat it, so Ashley only hears Samantha.
+            self._play_sound_effect("samantha_my_name_is.wav")
+            msg = ("My name is Samantha Hernandez Right. "
+                   "I'm your voice helper for Audio Vault TV.")
             self.status_label.SetLabel(msg)
             return
         elif command == 'greet':
@@ -1348,11 +1360,11 @@ class PlayerFrame(wx.Frame):
                 # Samantha asks, in her own recorded voice, what
                 # Honey wants to watch. NVDA does not repeat it.
                 self._play_sound_effect("samantha_how_are_you_doing.wav")
-                msg = f"Hi {name}! I'm Samantha. I'm listening."
+                msg = f"Hi {name}! I'm Samantha Hernandez Right. I'm listening."
             else:
-                self._play_sound_effect("samantha_greeting.wav")
-                msg = ("Hi! I'm Samantha. I'm listening. Tell me your "
-                       "name any time, just say my name is Honey.")
+                self._play_sound_effect("samantha_my_name_is.wav")
+                msg = ("Hi! I'm Samantha Hernandez Right. I'm listening. "
+                       "Tell me your name any time, just say my name is Honey.")
             self.status_label.SetLabel(msg)
             return
         elif command == 'feeling_good':
@@ -1586,8 +1598,10 @@ class PlayerFrame(wx.Frame):
             self.wake_word_mode = True
             self._play_sound_effect("start_of_request.wav")
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
-            # when wake-word mode starts, too.
-            msg = "I'm listening. Say 'Samantha' followed by a command."
+            # when wake-word mode starts, too. Ashley, 2026-11-26:
+            # she answers to Samantha, Sam, Sammy, Guide, or Metro.
+            msg = ("I'm listening. Say 'Samantha', 'Sam', 'Sammy', "
+                   "'Guide', or 'Metro', followed by a command.")
             self.status_label.SetLabel(msg)
             speak(msg)
 
@@ -1614,17 +1628,17 @@ class PlayerFrame(wx.Frame):
     def _wake_word_detected(self):
         """Handle wake word detection"""
         self._play_sound_effect("start_of_request.wav")
-        # Honey, 2026-11-23: when Samantha is heard, she asks in
-        # her own recorded, friendly voice: "What do you want to
-        # watch?" - a little louder than the first recording.
-        self._play_sound_effect("samantha_how_are_you_doing.wav")
-        # Samantha greets Honey by name, when she has told Samantha
+        # Ashley, 2026-11-26: when she calls Samantha — by
+        # Samantha, Sam, Sammy, Guide, or Metro — Samantha
+        # answers "Yes?" in her own recorded voice
+        # (sounds/samantha_yes.wav), then listens for the
+        # command. The "Hi Sweetie, how are you doing?"
+        # greeting stays for startup and the greet command.
+        self._play_sound_effect("samantha_yes.wav")
+        # Samantha greets Ashley by name, when she has told Samantha
         # her name by voice (see _parse_name_command / _set_user_name).
-        # Honey, 2026-11-23 evening: Samantha does the greeting,
-        # in her own recorded voice. NVDA does not greet her too,
-        # so she only hears Samantha, not a second greeting.
         name = self._get_user_name()
-        msg = f"Hi {name}, I'm listening" if name else "I'm listening"
+        msg = f"Yes? Hi {name}, I'm listening" if name else "Yes? I'm listening"
         self.status_label.SetLabel(msg)
         return
     
@@ -2423,6 +2437,10 @@ class PlayerFrame(wx.Frame):
         to pick from by hand. Honey asked for this 2026-11-23."""
         if not self._vault_ensure_login():
             return
+        # Ashley, 2026-11-26: Samantha tells her in her own
+        # recorded voice that she is downloading the show,
+        # so Ashley hears it even with NVDA quiet on.
+        self._play_sound_effect("samantha_downloading.wav")
         msg = f"Searching AudioVault for {query} to download..."
         self.status_label.SetLabel(msg)
         speak(msg)
@@ -2645,6 +2663,9 @@ class PlayerFrame(wx.Frame):
             self.status_label.SetLabel(msg)
             speak(msg)
             return
+        # Ashley, 2026-11-26: Samantha tells her in her own
+        # recorded voice that she is downloading the show.
+        self._play_sound_effect("samantha_downloading.wav")
         msg = f"Searching YouTube for {query} to download..."
         self.status_label.SetLabel(msg)
         speak(msg)

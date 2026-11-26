@@ -41,9 +41,14 @@ When she knows your name, Samantha greets you with it when she hears her wake wo
 
 Samantha now speaks in her own recorded voice, not just NVDA. Her voice is friendly, excited but not yelling, and a little louder than the first recording.
 
+- Her full name is Samantha Hernandez Right — first name Samantha, middle name Hernandez, last name Right. You still call her Samantha. Ask "what is your name" and she says it in her own voice: "Hi! My name is Samantha Hernandez Right. What is your name?" Her voice file is sounds/samantha_my_name_is.wav.
 - When Samantha hears her wake word, she asks in her own voice: "What do you want to watch?"
 - When you ask "what is your name", she answers in her own voice: "Hi, my name is Samantha. What is your name?"
 - Her voice files are in the sounds folder: samantha_greeting.wav (3.4 seconds) and samantha_what_to_watch.wav (1.6 seconds).
+
+## Wake Words — Samantha, Sam, Sammy, Guide, Metro
+
+Samantha answers to five wake words: Samantha, Sam, Sammy, Guide, and Metro. Say any one of them, then your command — for example "Sam, play Friends" or "Guide, what are my options?" When she hears her name she answers "Yes?" in her own recorded voice (sounds/samantha_yes.wav), then listens for your command. You still call her Samantha most of the time; the other names are there when you want them.
 
 ## "I'm Good" — Samantha Answers, Then Lists Your Channels and What's Next
 
@@ -73,6 +78,14 @@ Ask Samantha, by voice, "What are my options?" or "tell me the list of shows I h
 ## Loading Is Silent — Samantha Greets You in Her Voice
 
 Audio Vault TV does not print "Loading ..." lines any more, because NVDA reads the terminal out loud and was saying every loading line while the app opened. Loading is silent now. The only thing you hear is Samantha, in her own voice, saying "Hi Sweetie! How are you doing? What do you want to watch?" when the app is ready.
+
+## NVDA Quiet Toggle — Ctrl+Shift+G
+
+Press Ctrl+Shift+G in Audio Vault TV to turn NVDA quiet on or off while you are in the app. Ctrl+Shift+Q still works too. When NVDA is quiet, you hear Samantha's voice and the shows, not NVDA. When you close the app, NVDA talks again. The menus themselves are still read by NVDA when NVDA is back on, because Samantha's voice is recordings and cannot read new menu names she never recorded — the same limit as the TV guide.
+
+## Downloads in Samantha's Voice
+
+When Samantha starts downloading a show for you, from AudioVault.net or from YouTube, she says in her own recorded voice "I'm downloading that show for you" (sounds/samantha_downloading.wav), so you hear it even with NVDA quiet on.
 
 ## Live TV by Voice
 

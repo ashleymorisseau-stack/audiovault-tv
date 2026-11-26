@@ -89,6 +89,29 @@ class VoiceControl:
         self.wake_word_active = False
         self.audio_queue = queue.Queue()
         self.wake_word = "samantha"
+        # Ashley, 2026-11-26: Samantha answers to more than one
+        # name — Samantha, Sam, Sammy, Guide, and Metro. Longest
+        # first, so "samantha" wins over "sam" inside it, and
+        # "sammy" wins over "sam". wake_word stays "samantha"
+        # for anything that only knows the one name.
+        self.wake_words = ("samantha", "sammy", "sam",
+                           "guide", "metro")
+
+    def _find_wake_word(self, text):
+        """Which wake word is in this text, or None.
+
+        Word boundaries only, so "sam" does not fire inside
+        "samantha" or inside another word, and "guide" does
+        not fire inside "guided".
+        """
+        m = re.search(r"\b(samantha|sammy|sam|guide|metro)\b", text)
+        return m.group(1) if m else None
+
+    def _strip_wake_word(self, text):
+        """Strip a leading wake word ("Samantha, ..." / "Hey Sam, ...")."""
+        return re.sub(
+            r"^(?:hey\s+)?(?:samantha|sammy|sam|guide|metro)[,\s]+",
+            "", text.strip())
 
         # Initialize model
         if self.model_path.exists():
@@ -184,17 +207,21 @@ class VoiceControl:
                         text = result.get('text', '').strip().lower()
 
                         if text:
-                            # Check for wake word
-                            if self.wake_word in text:
+                            # Check for wake word — any of Samantha,
+                            # Sam, Sammy, Guide, Metro (Ashley, 2026-11-26).
+                            heard = self._find_wake_word(text)
+                            if heard:
                                 # Wake word detected, notify callback
                                 callback('wake_word_detected')
 
                                 # "Samantha, play" often arrives as one
                                 # utterance, so keep anything said after
-                                # "Samantha" in that same breath as the command
-                                # instead of throwing it away and waiting
-                                # for a second utterance.
-                                remainder = text.split(self.wake_word, 1)[1]
+                                # the wake word in that same breath as the
+                                # command instead of throwing it away and
+                                # waiting for a second utterance.
+                                remainder = re.split(
+                                    r"\b" + re.escape(heard) + r"\b",
+                                    text, maxsplit=1)[1]
                                 remainder = remainder.strip(" ,").strip()
                                 if remainder:
                                     callback('command', remainder)
@@ -276,11 +303,12 @@ class VoiceControl:
         # Samantha's name all the time. In one-time mode
         # (Ctrl+Shift+B, the push button) she just says the
         # command, for example "search for Young Sheldon".
-        # Strip a leading "Samantha" / "Hey Samantha" here, so
+        # Strip a leading wake word — Samantha, Sam, Sammy,
+        # Guide, or Metro (Ashley, 2026-11-26) — here, so
         # it is optional and never becomes part of the show name.
         # The wake-word path already strips it; this covers the
         # push-button path too.
-        text = re.sub(r"^(?:hey\s+)?samantha[,\s]+", "", text.strip())
+        text = self._strip_wake_word(text)
 
         # --- Name: Honey asked 2026-11-23 that Samantha learn her
         # name when she tells it to her, and remember it. Checked
@@ -487,8 +515,9 @@ class VoiceControl:
         restart. She never guesses a name she has not been told.
         """
         # In one-time mode the whole utterance can start with
-        # "Samantha, ..."; in wake-word mode it is already stripped.
-        text = re.sub(r"^(?:hey\s+)?samantha[,\s]+", "", text.strip())
+        # a wake word ("Samantha, ..." / "Sam, ..."); in
+        # wake-word mode it is already stripped.
+        text = self._strip_wake_word(text)
 
         if re.search(r"\bforget my name\b|\bforget what my name is\b",
                      text):
@@ -512,7 +541,9 @@ class VoiceControl:
             text)
         if match:
             name = _clean_name(match.group(1))
-            if name and name.lower() not in ("samantha", "you", "me"):
+            if name and name.lower() not in (
+                    "samantha", "sam", "sammy", "guide", "metro",
+                    "you", "me"):
                 return ('set_name', name)
         return None
 
