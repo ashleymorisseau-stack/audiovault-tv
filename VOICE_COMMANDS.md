@@ -107,6 +107,20 @@ When Audio Vault TV opens, Samantha does this, one thing at a time, in her own v
 
 Listening starts as soon as the greeting finishes, because you answer "I'm good" right away — an earlier version read the list first and only listened after it, so your answer was never heard and Samantha kept saying "Excuse me". She also waits longer between your words now (4 seconds instead of 2.5), so she hears every word even if you pause. And in wake-word mode she says "Excuse me" only once in a row, then stays quiet and keeps listening, instead of repeating it.
 
+## "I'm on it" — and She Keeps Listening
+
+When you ask Samantha to do work — search for a show, download one, play a channel, list your shows, read the guide — she answers "I'm on it" in her own voice right away, so you know she heard you and is working on it. Quick replies (how you are doing, "can you hear me", your name, play/pause, skipping) answer directly instead.
+
+Once she hears you, she keeps listening for the next thing you ask, without you having to press Ctrl+Shift+B again. She listens quietly (no chimes) after each answer, for 20 seconds at a time. If you say nothing, she stops quietly instead of repeating "Excuse me". Press Ctrl+Shift+B to stop her listening, or Ctrl+Shift+W for wake-word mode, which has its own loop.
+
+## NVDA Quiet — the Toggle, Made Robust
+
+NVDA must not talk at all while you are in Audio Vault TV. The app presses NVDA+Shift+S (sleep mode) when it opens and again when it closes, so NVDA talks again outside the app. Ctrl+Shift+Q turns it on and off by hand.
+
+Why it did not work before: the app always pressed Insert+Shift+S, but that only works when your NVDA key is Insert (desktop keyboard layout). With the laptop layout your NVDA key is CapsLock, so that keypress did nothing at all and NVDA kept reading everything. The app now reads NVDA's own settings file (%APPDATA%\nvda\nvda.ini) to find which key your NVDA uses — CapsLock for laptop layout, Insert or Numpad Insert for desktop — and presses the right one. It also only presses the key once the app window is actually focused, retries if it is not, and tries again when you come back to the window.
+
+One honest limit: the show list, the TV guide, and the "you have it / you don't have it" answers are still read by NVDA's voice, because Samantha's voice is recordings and a recording cannot read show names she never recorded. NVDA is silent for everything else in the app. A reading voice that sounds like Samantha is still to come — it needs a voice you have heard and picked first, and no sample of one could be made from here yet.
+
 When you choose one — "play Friends", "watch Classic Doctor Who" — she tells you plainly if you have it or not: "You have Friends. Now playing: Friends." or "You don't have a channel called ... , so I didn't change anything."
 
 ## Wake Chimes — Start Once, Then End Once, Separate

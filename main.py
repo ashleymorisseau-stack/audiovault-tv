@@ -83,26 +83,62 @@ def speak(text):
 # activated. Manual version, any time: press NVDA+Shift+S while
 # AudioVault TV is focused; Ctrl+Shift+Q in the app flips it too.
 # Honest limit: this is a blind keypress toggle — NVDA gives the app no
-# way to ask whether sleep is already on. If her NVDA key ever changes
-# from Insert, the keypress will do nothing and she should press
-# NVDA+Shift+S herself once instead.
+# way to ask whether sleep is already on. The keypress must use the
+# NVDA key this PC actually uses, so _nvda_modifier_vk() reads it
+# from NVDA's own settings file (see below). If NVDA's settings
+# cannot be read, Insert is assumed. If the keypress still does
+# nothing, she should press NVDA+Shift+S herself once instead.
 _NVDA_QUIET = False
 _NVDA_QUIET_MARKER = Path(tempfile.gettempdir()) / "audiovault_tv_nvda_quiet"
 
 
+def _nvda_modifier_vk():
+    """Virtual-key code of the NVDA modifier key on this PC.
+
+    Ashley, 2026-11-26: "the pain toggle does not work" — the
+    app pressed Insert+Shift+S, but that only works when the
+    NVDA key IS Insert (desktop keyboard layout). With the
+    laptop layout the NVDA key is CapsLock, so the Insert
+    keypress did nothing at all and NVDA kept talking in the
+    app. NVDA stores its layout in %APPDATA%\\nvda\\nvda.ini
+    ([keyboard] keyboardLayout, and the useCapsLock / numpad
+    modifier flags), so read it and press the right key.
+    Returns 0x14 (CapsLock) for laptop layout, 0x60 (Numpad 0)
+    for numpad Insert, 0x2D (Insert) otherwise.
+    """
+    try:
+        import configparser
+        ini = Path(os.environ.get("APPDATA", "")) / "nvda" / "nvda.ini"
+        cfg = configparser.ConfigParser()
+        cfg.read(ini)
+        layout = cfg.get("keyboard", "keyboardLayout",
+                         fallback="desktop").strip().lower()
+        if layout == "laptop":
+            return 0x14
+        if cfg.getboolean("keyboard", "useCapsLockAsNVDAModifierKey",
+                          fallback=False):
+            return 0x14
+        if cfg.getboolean("keyboard", "useNumpadInsertAsNVDAModifierKey",
+                          fallback=False):
+            return 0x60
+        return 0x2D
+    except Exception:
+        return 0x2D
+
+
 def _press_nvda_sleep_toggle():
-    """Press NVDA+Shift+S (desktop layout, NVDA key is Insert)."""
+    """Press NVDA+Shift+S with the NVDA key this PC uses."""
     if os.name != "nt":
         return False
     try:
         user32 = ctypes.windll.user32
         VK_SHIFT = 0x10
-        VK_INSERT = 0x2D
+        VK_NVDA = _nvda_modifier_vk()
         KEYEVENTF_KEYUP = 0x0002
-        for vk in (VK_SHIFT, VK_INSERT, 0x53):  # Shift, Insert, S
+        for vk in (VK_SHIFT, VK_NVDA, 0x53):  # Shift, NVDA key, S
             user32.keybd_event(vk, 0, 0, 0)
         time.sleep(0.05)
-        for vk in (0x53, VK_INSERT, VK_SHIFT):
+        for vk in (0x53, VK_NVDA, VK_SHIFT):
             user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
         return True
     except Exception:
@@ -192,6 +228,15 @@ class PlayerFrame(wx.Frame):
         
         self.is_voice_listening = False
         self.wake_word_mode = False
+        # Ashley, 2026-11-26: "make it so that it listens to me
+        # and responds every time I ask it something." Once
+        # Samantha hears a command, she keeps listening for the
+        # next one instead of stopping — continuous conversation.
+        # True while one-time listening should re-arm itself
+        # after each heard command. Set False when she stops
+        # listening herself (Ctrl+Shift+B) or starts wake-word
+        # mode, which has its own loop.
+        self._want_continuous = False
         # Ashley, 2026-11-26: the wake chimes were playing twice.
         # This flag says the high+low chimes already played for
         # this listening session, so they are not played again
@@ -1325,6 +1370,7 @@ class PlayerFrame(wx.Frame):
         
         if self.is_voice_listening:
             # Stop listening
+            self._want_continuous = False
             self.voice.stop_listening()
             self.is_voice_listening = False
             self._play_end_chime()
@@ -1337,14 +1383,40 @@ class PlayerFrame(wx.Frame):
             # when she starts listening, so Honey knows she is ready.
             # Ashley, 2026-11-26: high chime, then the low chime
             # 2 seconds later, and she still has 20 seconds to speak.
-            self.is_voice_listening = True
+            self._want_continuous = True
+            self._start_listening(chimes=True)
+    
+    def _start_listening(self, chimes=True):
+        """Start one-time listening (20 seconds) in a thread.
+
+        chimes=True rings the high-then-low wake chimes, for a
+        fresh start (Ctrl+Shift+B, or after the startup greeting).
+        chimes=False starts silently, for the automatic re-arm
+        after a command — she is already talking to Samantha,
+        so the chimes would only interrupt her.
+        """
+        self.is_voice_listening = True
+        if chimes:
             self._play_wake_chimes()
-            msg = "I'm listening"
-            self.status_label.SetLabel(msg)
-            speak(msg)
-            
-            thread = threading.Thread(target=self._voice_listen_thread, daemon=True)
-            thread.start()
+        msg = "I'm listening"
+        self.status_label.SetLabel(msg)
+        speak(msg)
+        
+        thread = threading.Thread(target=self._voice_listen_thread, daemon=True)
+        thread.start()
+    
+    def _rearm_listening(self):
+        """Listen again after a command, so Samantha responds
+        every time Ashley asks something, without her having to
+        press Ctrl+Shift+B again. Only re-arms while continuous
+        listening is wanted and nothing else is listening."""
+        if not getattr(self, "_want_continuous", False):
+            return
+        if not self.voice_available:
+            return
+        if self.is_voice_listening or self.wake_word_mode:
+            return
+        self._start_listening(chimes=False)
     
     def _voice_listen_thread(self):
         """Thread for voice listening"""
@@ -1357,6 +1429,13 @@ class PlayerFrame(wx.Frame):
             wx.CallAfter(self._play_end_chime)
             
             if text:
+                # A command was heard. Keep listening for the
+                # next one: re-arm 8 seconds later, once the
+                # answer to this command has been spoken. If
+                # nothing is heard next time, listening stops
+                # quietly instead of looping "Excuse me".
+                wx.CallAfter(
+                    lambda: wx.CallLater(8000, self._rearm_listening))
                 # Parse command
                 command = self.voice.parse_command(text)
                 
@@ -1382,6 +1461,28 @@ class PlayerFrame(wx.Frame):
         query = None
         if isinstance(command, tuple):
             command, query = command
+
+        # Ashley, 2026-11-26: "have her say I'm on it." When
+        # she asks Samantha to do work — search, download,
+        # play a channel, list shows, read the guide — Samantha
+        # answers "I'm on it" in her own recorded voice
+        # (sounds/samantha_im_on_it.wav) right away, so Ashley
+        # knows she was heard and is working on it. Quick
+        # replies (how she is doing, "can you hear me", her
+        # name, play/pause, skipping) answer directly instead
+        # and do not get an extra "I'm on it" first.
+        _WORK_COMMANDS = (
+            'search_shows', 'search_movies', 'search_youtube',
+            'download', 'download_youtube', 'download_first',
+            'download_status', 'cancel_downloads',
+            'play_channel', 'play_live_tv', 'play_live_channel',
+            'search_live_channels', 'stop_live_tv',
+            'list_shows', 'list_channels', 'whats_next',
+            'livetv_guide', 'fix_mixed_channels',
+            'delete_channel_downloads',
+        )
+        if command in _WORK_COMMANDS:
+            self._play_sound_effect("samantha_im_on_it.wav")
 
         if command == 'set_name':
             # Honey, 2026-11-23: Samantha learns her name when Honey
@@ -1653,15 +1754,20 @@ class PlayerFrame(wx.Frame):
         # Honey, 2026-11-23 evening: if Samantha cannot hear
         # anything, she says "Excuse me" and asks Honey to
         # say it again, instead of just "No command recognized".
+        # Ashley, 2026-11-26: in her own recorded voice, not
+        # NVDA's (sounds/samantha_excuse_me.wav), so NVDA
+        # stays quiet.
         msg = "Excuse me, I didn't hear you. Could you say that again?"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._play_sound_effect("samantha_excuse_me.wav")
     
     def _voice_error(self, error):
         """Handle voice recognition error"""
         # Listening ended with an error, so no end chime was
         # played — clear the chime flag so the next session
-        # can chime again.
+        # can chime again. And do not re-arm listening: a
+        # broken mic must not loop.
+        self._want_continuous = False
         self._wake_chimes_played = False
         msg = f"Voice error: {error}"
         self.status_label.SetLabel(msg)
@@ -1690,6 +1796,9 @@ class PlayerFrame(wx.Frame):
             # not only after Samantha is heard. Ashley, 2026-11-26:
             # high chime first, then the low chime 2 seconds later.
             self.wake_word_mode = True
+            # Wake-word mode has its own continuous loop, so
+            # one-time listening must not re-arm on top of it.
+            self._want_continuous = False
             self._excuse_me_said = False
             self._play_wake_chimes()
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
@@ -1762,7 +1871,7 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         if not getattr(self, "_excuse_me_said", False):
             self._excuse_me_said = True
-            speak(msg)
+            self._play_sound_effect("samantha_excuse_me.wav")
     
     def _check_channel_integrity(self):
         """Repair channels on startup instead of calling them corrupted.
