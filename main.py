@@ -1279,7 +1279,7 @@ class PlayerFrame(wx.Frame):
             if name:
                 # Samantha asks, in her own recorded voice, what
                 # Honey wants to watch. NVDA does not repeat it.
-                self._play_sound_effect("samantha_what_to_watch.wav")
+                self._play_sound_effect("samantha_how_are_you_doing.wav")
                 msg = f"Hi {name}! I'm Samantha. I'm listening."
             else:
                 self._play_sound_effect("samantha_greeting.wav")
@@ -1494,7 +1494,7 @@ class PlayerFrame(wx.Frame):
         # Honey, 2026-11-23: when Samantha is heard, she asks in
         # her own recorded, friendly voice: "What do you want to
         # watch?" - a little louder than the first recording.
-        self._play_sound_effect("samantha_what_to_watch.wav")
+        self._play_sound_effect("samantha_how_are_you_doing.wav")
         # Samantha greets Honey by name, when she has told Samantha
         # her name by voice (see _parse_name_command / _set_user_name).
         # Honey, 2026-11-23 evening: Samantha does the greeting,
@@ -1842,6 +1842,10 @@ class PlayerFrame(wx.Frame):
     
     def _show_greeting_dialog(self):
         """Show friendly greeting dialog"""
+        # Ashley, 2026-11-26: Samantha asks how she is doing in
+        # her own recorded voice first, before the dialog appears
+        # for typing an answer.
+        self._play_sound_effect("samantha_how_are_you_doing.wav")
         # First question: How are you doing?
         dlg = wx.TextEntryDialog(
             self,
