@@ -199,6 +199,26 @@ class _BackgroundDownloadCancelled(Exception):
     pass
 
 
+# Work commands — Ashley, 2026-11-26: "have her say I'm on it."
+# When she asks Samantha to do work — search, download, play a
+# channel, list shows, read the guide — Samantha answers "I'm on
+# it" in her own recorded voice right away, so Ashley knows she
+# was heard and is working on it. Quick replies (how she is
+# doing, "can you hear me", her name, play/pause, skipping)
+# answer directly instead and do not get an extra "I'm on it".
+_WORK_COMMANDS = (
+    'search_shows', 'search_movies', 'search_youtube',
+    'download', 'download_shows', 'download_movies',
+    'download_youtube', 'download_first',
+    'download_status', 'cancel_downloads',
+    'play_channel', 'play_live_tv', 'play_live_channel',
+    'search_live_channels', 'stop_live_tv',
+    'list_shows', 'list_channels', 'whats_next',
+    'livetv_guide', 'fix_mixed_channels',
+    'delete_channel_downloads',
+)
+
+
 class PlayerFrame(wx.Frame):
     def __init__(self):
         import time
@@ -255,6 +275,24 @@ class PlayerFrame(wx.Frame):
         # this listening session, so they are not played again
         # and the low chime is not repeated at the end.
         self._wake_chimes_played = False
+        # Samantha's voice, one clip at a time (Ashley,
+        # 2026-11-26): a dedicated pygame channel, a queue for
+        # sequences, and the install state for her reading voice
+        # — see _samantha_channel and _ensure_edge_tts.
+        self._samantha_channel_obj = None
+        self._samantha_queue = []
+        self._samantha_pump_timer = None
+        self._pending_voice_command_timer = None
+        self._last_typed_command = None
+        self._last_typed_command_at = 0.0
+        self._edge_install_state = "unknown"
+        self._edge_install_running = False
+        self._edge_install_lock = threading.Lock()
+        self._edge_install_last_try = 0.0
+        self._edge_install_fail_count = 0
+        self._edge_install_not_ready_said = 0
+        self._edge_install_explicit = False
+        self._pending_reading_text = None
         # Ashley, 2026-11-26: after the startup greeting asks
         # "How are you doing?", Samantha listens first and reads
         # the channel list after her answer (or after silence).
@@ -410,6 +448,8 @@ class PlayerFrame(wx.Frame):
         self._nvda_quiet_menu_item = nvda_quiet_item
         set_name_item = controls_menu.Append(wx.ID_ANY, "Set My Name", "Set your name for personalized messages")
         self.Bind(wx.EVT_MENU, self._on_set_name, set_name_item)
+        install_voice_item = controls_menu.Append(wx.ID_ANY, "Install My Reading Voice", "Get Samantha's reading voice ready, so she can read the show list")
+        self.Bind(wx.EVT_MENU, self._on_install_reading_voice, install_voice_item)
         controls_menu.AppendSeparator()
         cloud_toggle_item = controls_menu.Append(wx.ID_ANY, "Auto Free Up Space (OneDrive)",
                                                  "Automatically make downloads online-only to save disk space")
@@ -512,6 +552,10 @@ class PlayerFrame(wx.Frame):
         sizer.Add(wx.StaticText(panel, label="Type to Samantha (press Enter):"), 0, wx.LEFT | wx.TOP, 10)
         self.command_box = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
         self.command_box.Bind(wx.EVT_TEXT_ENTER, self._on_command_box_enter)
+        # Belt and braces for Enter (see _on_command_box_key):
+        # EVT_TEXT_ENTER is the normal path, but if Enter never
+        # produces one, the key itself still runs the command.
+        self.command_box.Bind(wx.EVT_KEY_DOWN, self._on_command_box_key)
         sizer.Add(self.command_box, 0, wx.EXPAND | wx.ALL, 10)
 
         panel.SetSizer(sizer)
@@ -1503,14 +1547,42 @@ class PlayerFrame(wx.Frame):
         Ashley, 2026-11-26: "I want her to respond when
         whenever I press enter." Runs the typed text as a
         command, exactly like a spoken one, and Samantha
-        answers in her own voice.
+        answers in her own voice. Enter is also caught by
+        _on_command_box_key (below): some setups swallow the
+        text-enter event, so the key handler is the belt to
+        this one's braces. Either way the command runs once:
+        the box is cleared before it runs, and a repeat of the
+        same words within a second is ignored.
         """
         text = self.command_box.GetValue().strip()
         if not text:
             return
+        if (getattr(self, "_last_typed_command", None) == text
+                and time.time() - getattr(
+                    self, "_last_typed_command_at", 0) < 1.0):
+            return
+        self._last_typed_command = text
+        self._last_typed_command_at = time.time()
         self.command_box.SetValue("")
         self.status_label.SetLabel(f"You typed: {text}")
         self._run_typed_command(text)
+
+    def _on_command_box_key(self, event):
+        """Enter pressed in the Type to Samantha box (key event).
+
+        EVT_TEXT_ENTER is the normal path, but if Enter never
+        produces one — the frame's EVT_CHAR_HOOK, NVDA, or the
+        control itself can swallow it — this catches the key
+        itself, runs the command, and does not pass the key on,
+        so the text-enter event cannot run it a second time.
+        Every other key is passed on, so typing, Space, and the
+        arrow keys still work in the box.
+        """
+        keycode = event.GetKeyCode()
+        if keycode in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            self._on_command_box_enter(event)
+            return
+        event.Skip()
 
     def _run_typed_command(self, text):
         """Run a typed command through the same path as voice.
@@ -1520,49 +1592,81 @@ class PlayerFrame(wx.Frame):
         shows" does exactly what saying it does. Works even
         when the voice recogniser is not available (no Vosk
         model): parsing is pure text, so a bare parser is built
-        for the purpose instead of failing.
+        for the purpose instead of failing. If anything in the
+        command fails, Samantha says so in her own voice
+        instead of the box going silent.
         """
-        parser = self.voice
-        if parser is None:
+        try:
+            parser = self.voice
+            if parser is None:
+                try:
+                    parser = VoiceControl()
+                except Exception:
+                    # No model: parsing needs no model, only the
+                    # word lists, so build a bare parser with
+                    # every attribute __init__ sets, so parsing
+                    # can never fail on a missing attribute.
+                    import queue
+                    parser = VoiceControl.__new__(VoiceControl)
+                    parser.model_path = Path("vosk-model-small-en-us-0.15")
+                    parser.model = None
+                    parser.recognizer = None
+                    parser.is_listening = False
+                    parser.wake_word_active = False
+                    parser.audio_queue = queue.Queue()
+                    parser.wake_word = "samantha"
+                    parser.wake_words = ("samantha", "sammy", "sam",
+                                         "guide", "metro")
+            command = parser.parse_command(text)
+            self._execute_voice_command(command, text)
+        except Exception as e:
             try:
-                parser = VoiceControl()
+                self.logger.log_error(f"TYPED COMMAND: {text!r} - {e}")
             except Exception:
-                # No model: parsing needs no model, only the
-                # word lists, so build a bare parser.
-                parser = VoiceControl.__new__(VoiceControl)
-                parser.wake_words = ("samantha", "sammy", "sam",
-                                     "guide", "metro")
-        command = parser.parse_command(text)
-        self._execute_voice_command(command, text)
+                pass
+            self._answer_in_samantha_voice(
+                "Sorry, that didn't work. Could you say that again?",
+                "samantha_excuse_me.wav")
 
     def _execute_voice_command(self, command, text):
-        """Execute a voice command"""
+        """Execute a voice command.
+
+        Ashley, 2026-11-26: "have her say I'm on it." When she
+        asks Samantha to do work — search, download, play a
+        channel, list shows, read the guide — Samantha answers
+        "I'm on it" in her own recorded voice
+        (sounds/samantha_im_on_it.wav) right away, so Ashley
+        knows she was heard and is working on it. The answer
+        itself waits until "I'm on it" has finished: the old
+        code played it and ran the command in the same breath,
+        so the answer talked over it. Quick replies (how she
+        is doing, "can you hear me", her name, play/pause,
+        skipping) answer directly instead and do not get an
+        extra "I'm on it" first. A newer command replaces a
+        still-waiting one — she only ever hears the latest
+        answer.
+        """
+        name = command[0] if isinstance(command, tuple) else command
+        if name in _WORK_COMMANDS:
+            pending = getattr(self, "_pending_voice_command_timer", None)
+            if pending is not None:
+                try:
+                    pending.Stop()
+                except Exception:
+                    pass
+            ms = self._play_sound_effect("samantha_im_on_it.wav")
+            self._pending_voice_command_timer = wx.CallLater(
+                ms + 200, self._execute_voice_command_now, command, text)
+            return
+        self._execute_voice_command_now(command, text)
+
+    def _execute_voice_command_now(self, command, text):
+        """Run a voice command (after "I'm on it", if there was one)."""
+        self._pending_voice_command_timer = None
         # Handle tuple commands (command, argument)
         query = None
         if isinstance(command, tuple):
             command, query = command
-
-        # Ashley, 2026-11-26: "have her say I'm on it." When
-        # she asks Samantha to do work — search, download,
-        # play a channel, list shows, read the guide — Samantha
-        # answers "I'm on it" in her own recorded voice
-        # (sounds/samantha_im_on_it.wav) right away, so Ashley
-        # knows she was heard and is working on it. Quick
-        # replies (how she is doing, "can you hear me", her
-        # name, play/pause, skipping) answer directly instead
-        # and do not get an extra "I'm on it" first.
-        _WORK_COMMANDS = (
-            'search_shows', 'search_movies', 'search_youtube',
-            'download', 'download_youtube', 'download_first',
-            'download_status', 'cancel_downloads',
-            'play_channel', 'play_live_tv', 'play_live_channel',
-            'search_live_channels', 'stop_live_tv',
-            'list_shows', 'list_channels', 'whats_next',
-            'livetv_guide', 'fix_mixed_channels',
-            'delete_channel_downloads',
-        )
-        if command in _WORK_COMMANDS:
-            self._play_sound_effect("samantha_im_on_it.wav")
 
         if command == 'set_name':
             # Honey, 2026-11-23: Samantha learns her name when Honey
@@ -1629,11 +1733,11 @@ class PlayerFrame(wx.Frame):
             # cleared and _voice_no_command will not read it
             # a second time.
             self._startup_list_pending = False
-            self._play_sound_effect("samantha_glad_youre_good.wav")
+            glad_ms = self._play_sound_effect("samantha_glad_youre_good.wav")
             msg = ("That's wonderful! I'm so glad you're doing "
                    "good. What do you want to watch?")
             self.status_label.SetLabel(msg)
-            wx.CallLater(6000, self._speak_channels_and_guide)
+            wx.CallLater(glad_ms + 300, self._speak_channels_and_guide)
             return
         elif command == 'can_you_hear_me':
             # Ashley, 2026-11-26: when she asks "can you hear
@@ -1643,6 +1747,14 @@ class PlayerFrame(wx.Frame):
             self._play_sound_effect("samantha_yes_i_can.wav")
             msg = "Yes, I can hear you."
             self.status_label.SetLabel(msg)
+            return
+        elif command == 'install_reading_voice':
+            # Ashley, 2026-11-26: "install my reading voice" —
+            # the checkable step for Samantha's reading voice.
+            # Samantha says "I'm on it", the install runs in
+            # the background, and she says when it is ready
+            # (see _on_install_reading_voice).
+            self._on_install_reading_voice()
             return
         elif command == 'list_channels':
             # "Samantha, list all the channels I have" — read
@@ -1756,7 +1868,9 @@ class PlayerFrame(wx.Frame):
                 self._vault_voice_download(query, "movies")
             else:
                 self._on_vault_search(None, kind="movies")
-            msg = f"Command recognized: {text}"
+            # The downloading clip (or the search results) speaks
+            # for itself — no extra "Command recognized" over it.
+            return
         elif command == 'search_shows':
             # Honey, 2026-11-23 evening: same as movies above.
             # "search for Young Sheldon" searches AudioVault for
@@ -1765,7 +1879,9 @@ class PlayerFrame(wx.Frame):
                 self._vault_voice_download(query, "shows")
             else:
                 self._on_vault_search(None, kind="shows")
-            msg = f"Command recognized: {text}"
+            # The downloading clip (or the search results) speaks
+            # for itself — no extra "Command recognized" over it.
+            return
         elif command in ('download_shows', 'download_movies'):
             # "Samantha, download Close Enough" — search AudioVault for the
             # named show/movie and download the top result, with no
@@ -1775,13 +1891,17 @@ class PlayerFrame(wx.Frame):
                 self._vault_voice_download(query, kind)
             else:
                 self._on_vault_recents(None, kind="movies")
-            msg = f"Command recognized: {text}"
+            # The downloading clip speaks for itself — no extra
+            # "Command recognized" over it.
+            return
         elif command == 'search_youtube':
             if query:
                 self._yt_voice_search(query)
             else:
                 self._on_yt_search(None)
-            msg = f"Command recognized: {text}"
+            # _yt_voice_search already answers in Samantha's
+            # voice — no extra "Command recognized" over it.
+            return
         elif command == 'download_youtube':
             # "Samantha, download Close Enough from YouTube" — search
             # YouTube for the named video and download the top
@@ -1791,7 +1911,9 @@ class PlayerFrame(wx.Frame):
                 self._yt_voice_download(query)
             else:
                 self._on_yt_search(None)
-            msg = f"Command recognized: {text}"
+            # The downloading clip speaks for itself — no extra
+            # "Command recognized" over it.
+            return
         elif command == 'download_first':
             # "Samantha, download it" after a voice search: download the
             # first result from that search. _vault_voice_download_first
@@ -1810,16 +1932,30 @@ class PlayerFrame(wx.Frame):
             return
         elif command == 'download':
             self._on_vault_recents(None, kind="movies")
-            msg = f"Command recognized: {text}"
+            # The recents list speaks for itself — no extra
+            # "Command recognized" over it.
+            return
         else:
             # Honey, 2026-11-23 evening: if Samantha heard words
             # but did not understand them, she says "Excuse me"
-            # and asks Honey to say it again.
+            # and asks Honey to say it again. In her own voice:
+            # the old fall-through answered with speak(), which
+            # is NVDA and silent while NVDA quiet is on, so a
+            # typed command she did not understand was met with
+            # silence.
             msg = (f"Excuse me, I didn't understand {text}. "
                    "Could you say that again?")
-        
-        self.status_label.SetLabel(msg)
-        speak(msg)
+            self._answer_in_samantha_voice(
+                msg, "samantha_excuse_me.wav")
+            return
+
+        # Ashley, 2026-11-26: every other answer goes through
+        # Samantha's voice too (see _answer_in_samantha_voice).
+        # The old code ended here with speak(msg) — NVDA — which
+        # is silent while NVDA quiet is on, so typing "my name
+        # is Ashley", "pause", "next file" or "download status"
+        # ran the command and she heard nothing at all.
+        self._answer_in_samantha_voice(msg)
     
     def _voice_no_command(self):
         """Handle no command recognized"""
@@ -2126,9 +2262,15 @@ class PlayerFrame(wx.Frame):
                     pass
                 self.logger.log_playback("NVDA", "Quiet mode already on from previous run; key not pressed again")
                 return
+        # Raise the window, but do NOT SetFocus() on the frame:
+        # that yanked focus out of the "Type to Samantha" box
+        # (and out of anywhere else she was typing) every time
+        # quiet mode was enabled or re-enabled, so her typing
+        # went nowhere and Enter did nothing. Raising the window
+        # is enough for the NVDA sleep keypress, which only
+        # needs this window to be the active one.
         try:
             self.Raise()
-            self.SetFocus()
         except Exception:
             pass
         wx.CallLater(300, self._press_nvda_quiet_if_focused, _retry)
@@ -2385,72 +2527,230 @@ class PlayerFrame(wx.Frame):
             except Exception as e:
                 print(f"Could not play startup sound: {e}")
     
-    def _play_sound_effect(self, filename):
-        """Play a sound effect from the sounds folder"""
-        sound_file = Path(__file__).parent / "sounds" / filename
-        if sound_file.exists():
-            try:
-                import pygame
-                # Initialize a separate channel for sound effects
-                pygame.mixer.init()
-                sound = pygame.mixer.Sound(str(sound_file))
-                sound.play()
-            except Exception as e:
-                print(f"Could not play sound effect {filename}: {e}")
+    def _samantha_channel(self):
+        """The one pygame channel Samantha's voice uses.
 
-    def _wake_chime_delay_ms(self):
-        """How long to wait before the low chime, in milliseconds.
+        Ashley, 2026-11-26: Samantha's clips kept overlapping
+        each other, because every _play_sound_effect did a fresh
+        pygame.mixer.init() and Sound.play(), and pygame hands
+        each fresh Sound a different free channel. Now every
+        Samantha clip — recordings, chimes, readings — plays on
+        this one channel, and a new clip stops the old one first
+        (see _play_sound_effect), so she is only ever one voice
+        at a time. Shows keep playing: they use
+        pygame.mixer.music, never this channel, so stopping it
+        never stops a show.
+        """
+        if getattr(self, "_samantha_channel_obj", None) is not None:
+            return self._samantha_channel_obj
+        import pygame
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        self._samantha_channel_obj = pygame.mixer.Channel(0)
+        return self._samantha_channel_obj
 
-        The high chime (start_of_request.wav) is one long note
-        and lasts about 4.6 seconds. A fixed 2-second wait made
-        the low chime start while the high chime was still
-        ringing, so they played at the same time. The low chime
-        now waits until the high chime has actually finished,
-        plus a short quiet gap. The length is read from the
-        file itself, so it stays right even if the chime file
-        is ever replaced.
+    def _clip_ms(self, path):
+        """Length of a sound file in milliseconds.
+
+        Read from the wav header when it has one; otherwise ask
+        pygame for the length. Used so a next clip (or listening)
+        is scheduled after this clip actually finishes, instead
+        of a fixed guess that overlaps or cuts it off.
         """
         try:
             import wave
-            path = Path(__file__).parent / "sounds" / "start_of_request.wav"
             with wave.open(str(path), "rb") as w:
-                seconds = w.getnframes() / float(w.getframerate())
-            return int(seconds * 1000) + 300
+                return int(w.getnframes() / float(w.getframerate()) * 1000)
         except Exception:
-            return 5000
+            pass
+        try:
+            import pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            return int(pygame.mixer.Sound(str(path)).get_length() * 1000)
+        except Exception:
+            return 2000
+
+    def _play_sound_effect(self, filename):
+        """Play a Samantha clip, one at a time.
+
+        Ashley, 2026-11-26: clips were overlapping, because a
+        fresh Sound played on a fresh channel every time and
+        nothing ever stopped the previous clip. Now the clip
+        plays on Samantha's one dedicated channel
+        (see _samantha_channel), and that channel is stopped
+        first, so a new clip cuts the old one off instead of
+        talking over it. Any queued sequence (wake chimes,
+        greeting) is cancelled too — it belonged to the turn
+        this clip interrupts. Shows are untouched: they play
+        through pygame.mixer.music, not this channel.
+        Returns the clip length in milliseconds, so callers can
+        schedule what comes next after it finishes.
+        """
+        sound_file = Path(__file__).parent / "sounds" / filename
+        if not sound_file.exists():
+            return 0
+        self._cancel_samantha_queue()
+        try:
+            import pygame
+            channel = self._samantha_channel()
+            channel.stop()
+            sound = pygame.mixer.Sound(str(sound_file))
+            channel.play(sound)
+            return self._clip_ms(sound_file)
+        except Exception as e:
+            print(f"Could not play sound effect {filename}: {e}")
+            return 0
+
+    def _cancel_samantha_queue(self):
+        """Drop any Samantha clips still waiting their turn.
+
+        If a dropped clip was keeping _samantha_reading up
+        (a "not ready" clip, or an "I'm on it" while the
+        reading voice installed), clear that flag too — nothing
+        is reading any more, so listening must not wait forever
+        for a clip that will never play. Next-step callbacks
+        (the greeting after "Audio Vault TV") are NOT run: the
+        turn they belonged to was interrupted.
+        """
+        queue = getattr(self, "_samantha_queue", None) or []
+        for _path, after in queue:
+            try:
+                if after is not None and after == self._clear_samantha_reading:
+                    self._samantha_reading = False
+            except Exception:
+                pass
+        self._samantha_queue = []
+        timer = getattr(self, "_samantha_pump_timer", None)
+        self._samantha_pump_timer = None
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+
+    def _queue_samantha_sound(self, filename_or_path, after=None):
+        """Play a Samantha clip after the one playing now finishes.
+
+        Ashley, 2026-11-26: sequences — wake chimes, the
+        greeting, "I'm on it" then the answer, the guide intro
+        then the reading — were all starting together and
+        talking over each other. Queued clips wait their turn:
+        each one plays on Samantha's dedicated channel only
+        once the channel is idle, then the next one starts.
+        A new _play_sound_effect cancels the queue (see above),
+        so a fresh command still cuts in at once. `after` runs
+        on the main thread once this clip has finished.
+        `filename_or_path` is a file in sounds/, or a full path
+        (a synthesised reading file).
+        """
+        path = Path(str(filename_or_path))
+        if not path.is_absolute():
+            path = Path(__file__).parent / "sounds" / filename_or_path
+        self._samantha_queue.append((str(path), after))
+        if getattr(self, "_samantha_pump_timer", None) is None:
+            self._pump_samantha_queue()
+
+    def _play_samantha_sequence(self, filenames, after=None):
+        """Play clips one after another, then run `after`.
+
+        The wake chimes (high, then low) and the startup greeting
+        use this, so each clip is heard whole before the next one
+        starts — never at the same time, never twice.
+        """
+        for filename in filenames:
+            self._queue_samantha_sound(filename)
+        if after is not None:
+            self._samantha_queue.append((None, after))
+            if getattr(self, "_samantha_pump_timer", None) is None:
+                self._pump_samantha_queue()
+
+    def _pump_samantha_queue(self):
+        """Play the next queued Samantha clip, when the channel is free."""
+        self._samantha_pump_timer = None
+        if not getattr(self, "_samantha_queue", None):
+            return
+        try:
+            channel = self._samantha_channel()
+            if channel.get_busy():
+                self._samantha_pump_timer = wx.CallLater(
+                    200, self._pump_samantha_queue)
+                return
+        except Exception:
+            pass
+        path, after = self._samantha_queue.pop(0)
+        if path is None:
+            if after is not None:
+                try:
+                    after()
+                except Exception:
+                    pass
+            self._pump_samantha_queue()
+            return
+        ms = 0
+        try:
+            import pygame
+            channel = self._samantha_channel()
+            sound = pygame.mixer.Sound(path)
+            channel.play(sound)
+            ms = self._clip_ms(path)
+        except Exception as e:
+            print(f"Could not play queued sound {path}: {e}")
+        if after is not None:
+            wx.CallLater(ms + 150, after)
+        self._samantha_pump_timer = wx.CallLater(
+            ms + 150, self._pump_samantha_queue)
+
+    def _answer_in_samantha_voice(self, text, fallback_clip="samantha_im_on_it.wav"):
+        """Answer a command so Ashley actually hears it.
+
+        Ashley, 2026-11-26: typing a command and pressing Enter
+        ran it, but she heard nothing back. The old code answered
+        most commands with speak(), which is NVDA — and NVDA quiet
+        mode (on by default in the app) makes speak() say nothing
+        at all. So every command answer now goes through
+        Samantha's reading voice when it is ready; when it is not
+        ready yet, she hears a short recorded clip instead of
+        silence — "I'm on it" for an action that was done, or the
+        clip the caller names (for example "Excuse me" when she
+        was not understood, or the "reading voice isn't ready"
+        clip when the answer itself is a list or an error she
+        needs the words of). Never NVDA, never Microsoft.
+        """
+        try:
+            self.status_label.SetLabel(text)
+        except Exception:
+            pass
+        if self._samantha_voice_mode() == "edge":
+            self._say_in_samantha_voice(text)
+        else:
+            self._queue_samantha_sound(fallback_clip)
 
     def _play_wake_chimes(self):
-        """Wake chimes: high chime first, low chime after it finishes.
+        """Wake chimes: high chime once, then low chime once.
 
         Ashley, 2026-11-26: "make it go on the high chime and
         then two seconds later have it on a low chime" — using
         the chimes she already has, nothing new. The high chime
-        is start_of_request.wav (one long high C), the low chime
-        is end_of_request.wav (medium G to medium C). But the
-        high chime lasts about 4.6 seconds, so "two seconds
-        later" started the low chime while the high chime was
-        still ringing — they played at the same time, and she
-        said they are supposed to be separate. Now the low
-        chime waits until the high chime has finished, plus a
-        short quiet gap, so you hear one high chime, a pause,
-        then one low chime, each once only. Listening stays
-        open the whole time — 20 seconds one-time, 15 seconds
-        after a wake word — so the low chime does not cut her
-        off; she still has plenty of time to speak.
-
-        Ashley, 2026-11-26: the chimes were playing twice, and
-        they are supposed to play once — once on the high,
-        once on the low. So if they already played for this
-        listening session, this does nothing. The low chime
-        is also the end-of-request sound, so _play_end_chime
-        skips it too once the chimes have played.
+        is start_of_request.wav (one long high C, about 4.6
+        seconds), the low chime is end_of_request.wav (medium G
+        to medium C). A fixed 2-second wait started the low
+        chime while the high chime was still ringing, so they
+        played at the same time; and the low chime also rang
+        again at the end of the request. Now the two chimes are
+        a sequence (see _play_samantha_sequence): the low chime
+        waits until the high chime has actually finished, each
+        plays once only, and _play_end_chime still skips the low
+        chime once the chimes have played. Listening stays open
+        the whole time — 20 seconds one-time, 15 seconds after a
+        wake word — so the low chime does not cut her off; she
+        still has plenty of time to speak.
         """
         if self._wake_chimes_played:
             return
         self._wake_chimes_played = True
-        self._play_sound_effect("start_of_request.wav")
-        wx.CallLater(self._wake_chime_delay_ms(),
-                     self._play_sound_effect, "end_of_request.wav")
+        self._play_samantha_sequence(
+            ["start_of_request.wav", "end_of_request.wav"])
 
     def _play_end_chime(self):
         """End-of-request chime, once only.
@@ -2520,10 +2820,12 @@ class PlayerFrame(wx.Frame):
                 nvda.nvdaController_cancelSpeech()
             except Exception:
                 pass
-        # Step 1: "Audio Vault TV" in Samantha's voice.
-        self._play_sound_effect("audio_vault_tv.wav")
+        # Step 1: "Audio Vault TV" in Samantha's voice, then
+        # the greeting — one after the other, never overlapping
+        # (see _play_samantha_sequence).
         self.status_label.SetLabel("Audio Vault TV")
-        wx.CallLater(2200, self._startup_greeting)
+        self._play_samantha_sequence(
+            ["audio_vault_tv.wav"], after=self._startup_greeting)
 
     def _startup_greeting(self):
         """Startup step 2: the greeting, then listen for her answer.
@@ -2543,12 +2845,13 @@ class PlayerFrame(wx.Frame):
         _voice_no_command) and Samantha listens again.
         """
         self._startup_list_pending = True
-        self._play_sound_effect("samantha_how_are_you_doing.wav")
+        greeting_ms = self._play_sound_effect("samantha_how_are_you_doing.wav")
         self.status_label.SetLabel(
             "Hi Sweetie! How are you doing? What do you want to watch?")
-        # The greeting is about 5 seconds; listen as soon as
-        # it finishes, so her answer is heard.
-        wx.CallLater(5400, self._listen_after_greeting)
+        # Listen as soon as the greeting actually finishes, so
+        # her answer is heard — the wait is the clip's own
+        # length, not a fixed guess.
+        wx.CallLater(greeting_ms + 300, self._listen_after_greeting)
 
     def _startup_show_list(self):
         """Startup step 3: name the channels she has, then listen.
@@ -2955,7 +3258,6 @@ class PlayerFrame(wx.Frame):
         self._play_sound_effect("samantha_downloading.wav")
         msg = f"Searching AudioVault for {query} to download..."
         self.status_label.SetLabel(msg)
-        speak(msg)
         thread = threading.Thread(
             target=self._vault_voice_download_thread, args=(query, kind),
             daemon=True)
@@ -3082,7 +3384,7 @@ class PlayerFrame(wx.Frame):
         if not results:
             msg = f"I could not find {query} on AudioVault."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         self._queue_voice_download(
             self._pick_best_voice_result(results, query), kind)
@@ -3101,7 +3403,7 @@ class PlayerFrame(wx.Frame):
         if not results:
             msg = "There is no search to download from yet. Search for a show first."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         kind = getattr(self, "_last_search_kind", "shows")
         query = getattr(self, "_last_search_query", "") or ""
@@ -3119,11 +3421,11 @@ class PlayerFrame(wx.Frame):
         if not YT_AVAILABLE:
             msg = "YouTube is not available right now."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         msg = f"Searching YouTube for {query}..."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         thread = threading.Thread(
             target=self._yt_voice_search_thread, args=(query,), daemon=True)
         thread.start()
@@ -3141,7 +3443,7 @@ class PlayerFrame(wx.Frame):
         if not results:
             msg = f"I could not find {query} on YouTube."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         # The actual video first: exact title, then a title
         # starting with the name she said, then the rest in
@@ -3173,14 +3475,13 @@ class PlayerFrame(wx.Frame):
         if not YT_AVAILABLE:
             msg = "YouTube is not available right now."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         # Ashley, 2026-11-26: Samantha tells her in her own
         # recorded voice that she is downloading the show.
         self._play_sound_effect("samantha_downloading.wav")
         msg = f"Searching YouTube for {query} to download..."
         self.status_label.SetLabel(msg)
-        speak(msg)
         thread = threading.Thread(
             target=self._yt_voice_download_thread, args=(query,),
             daemon=True)
@@ -3199,7 +3500,7 @@ class PlayerFrame(wx.Frame):
         if not results:
             msg = f"I could not find {query} on YouTube."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         self._queue_yt_voice_download(results[0])
 
@@ -3213,7 +3514,7 @@ class PlayerFrame(wx.Frame):
         if not url:
             msg = f"I could not download {title} from YouTube."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         # Honey, 2026-11-23: a voice YouTube download goes in
         # its own folder named after the show, so a channel can be
@@ -3236,7 +3537,7 @@ class PlayerFrame(wx.Frame):
         self._bg_yt_percent = 0
         msg = f"Downloading {title} from YouTube in the background."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         self._yt_download_next()
 
     def _queue_voice_download(self, result, kind):
@@ -3264,7 +3565,7 @@ class PlayerFrame(wx.Frame):
         self._bg_vault_percent = 0
         msg = f"Downloading {name} in the background."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         self._vault_download_next()
 
     def _vault_search_thread(self, query, kind):
@@ -3353,7 +3654,7 @@ class PlayerFrame(wx.Frame):
         """Speak (and show) what is downloading in the background."""
         msg = self._bg_download_status_text()
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
 
     def _on_cancel_downloads(self, event=None):
         """Stop any background downloads.
@@ -3370,7 +3671,7 @@ class PlayerFrame(wx.Frame):
             self._yt_download_idx = len(self._yt_download_queue)
         msg = "Cancelling downloads. The one already downloading will stop shortly."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
 
     def _vault_show_results(self, results, kind, live_results=None):
         """Show search/recent results and allow multiple downloads"""
@@ -3426,7 +3727,7 @@ class PlayerFrame(wx.Frame):
                 c["name"] for c in live_results[:3])
             msg = (f"Found live too: {live_names}. "
                    f"Say play one of those live to watch it live. " + msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
         
         # Custom dialog with CheckListBox for NVDA accessibility
         dlg = wx.Dialog(self, title="AudioVault Results", size=(500, 400))
@@ -3518,7 +3819,7 @@ class PlayerFrame(wx.Frame):
             
             self.download_dest = dest
             self.download_queue_index = 0
-            speak(f"Queued {len(self.download_queue)} downloads")
+            self._answer_in_samantha_voice(f"Queued {len(self.download_queue)} downloads")
             self._vault_download_next()
         else:
             dlg.Destroy()
@@ -4014,7 +4315,7 @@ class PlayerFrame(wx.Frame):
     def _vault_error(self, message):
         """Handle AudioVault errors"""
         self.status_label.SetLabel(message)
-        speak(message)
+        self._answer_in_samantha_voice(message, "samantha_reading_not_ready.wav")
     
     # ---- YouTube Methods ----
 
@@ -4209,7 +4510,7 @@ class PlayerFrame(wx.Frame):
         """Show a visible error dialog (not just a spoken status line, which
         can be missed) and speak it, for YouTube problems."""
         self.status_label.SetLabel(message)
-        speak(message)
+        self._answer_in_samantha_voice(message, "samantha_reading_not_ready.wav")
         self.logger.log_error(f"YOUTUBE: {message}")
         wx.MessageBox(message, "YouTube", wx.OK | wx.ICON_WARNING)
 
@@ -4226,7 +4527,7 @@ class PlayerFrame(wx.Frame):
         self._last_search_source = "youtube"
         spoken_names = "; ".join(
             f"{i + 1}. {r['title']}" for i, r in enumerate(results[:3]))
-        speak(f"Found {len(items)} results. {spoken_names}.")
+        self._answer_in_samantha_voice(f"Found {len(items)} results. {spoken_names}.", "samantha_reading_not_ready.wav")
 
         dlg = wx.Dialog(self, title="YouTube Results", size=(600, 400))
         panel = wx.Panel(dlg)
@@ -4558,13 +4859,13 @@ class PlayerFrame(wx.Frame):
         if error:
             msg = error
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         if not channel:
             msg = (f"I couldn't find a live channel called {query}."
                    if query else "I couldn't find a live channel to play.")
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         self._livetv_play(channel)
 
@@ -4598,12 +4899,12 @@ class PlayerFrame(wx.Frame):
         except Exception as e:
             msg = f"I could not fix the mixed up shows: {e}"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         if not report:
             msg = "I checked every channel, and no shows are mixed up."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         parts = []
         total = 0
@@ -4613,7 +4914,7 @@ class PlayerFrame(wx.Frame):
         msg = (f"Fixed the mixed up shows. Took out {total} file(s): "
                + "; ".join(parts) + ".")
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
         # Reload the current channel so what she hears next is
         # the unmixed playlist, not the old one.
         try:
@@ -4783,7 +5084,10 @@ class PlayerFrame(wx.Frame):
         self._play_sound_effect("samantha_coming_up_next.wav")
         text = self._livetv_guide_text(channel_name)
         self.status_label.SetLabel(text)
-        speak(text)
+        # Samantha reads it herself, like the main guide: the old
+        # speak() here is NVDA, silent while NVDA quiet is on, so
+        # the live guide was never heard at all.
+        self._say_in_samantha_voice(text)
 
     def _channel_file_names(self, channel_name):
         """File names in one channel, without switching to it.
@@ -4957,22 +5261,69 @@ class PlayerFrame(wx.Frame):
           once and is GONE — Ashley said "I didn't tell you to add Microsoft" and "I don't like
           Microsoft Sierra", so it is never used, not even as
           a fallback.
-        The result is cached for the run. Honest note: Ashley
-        has not heard the Aria reading voice yet — no sample
-        could be made from here — so if she does not like it,
-        the voice name is the one line to change.
+        Only a working reading voice is cached. Honest note:
+        Ashley has not heard the Aria reading voice yet — no
+        sample could be made from here — so if she does not like
+        it, the voice name is the one line to change.
         """
         cached = getattr(self, "_samantha_voice_mode_cache", "unset")
-        if cached != "unset":
-            return cached
+        if cached == "edge":
+            return "edge"
+        # Ashley, 2026-11-26: "not ready" must never be cached
+        # for the whole run. The old code cached None too, so
+        # once the voice was missing at the first ask, every ask
+        # after that said "not ready" even after the install had
+        # finished — until the app was restarted. Now only a
+        # working reading voice is cached; a missing one is
+        # checked again on every ask, so the first ask after the
+        # install finishes hears the list.
         mode = None
         try:
             import edge_tts  # noqa: F401
             mode = "edge"
         except Exception:
             mode = None
-        self._samantha_voice_mode_cache = mode
+        if mode == "edge":
+            self._samantha_voice_mode_cache = "edge"
         return mode
+
+    def _clear_samantha_reading(self):
+        """Mark Samantha's reading finished (queue callback)."""
+        self._samantha_reading = False
+
+    def _edge_import_ok(self):
+        """True when the reading-voice library imports right now."""
+        try:
+            import edge_tts  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def _edge_install_should_retry(self):
+        """True when a new install attempt may start.
+
+        Never while one is already running (the old code could
+        start two pip installs at once — one at startup, one
+        from asking for the list — and they fought each other),
+        and not within a minute of the last try, so asking
+        three times in a row does not start three installs.
+        """
+        if getattr(self, "_edge_install_running", False):
+            return False
+        try:
+            last = float(getattr(self, "_edge_install_last_try", 0) or 0)
+        except Exception:
+            last = 0
+        return (time.time() - last) > 60
+
+    def _write_edge_flag(self, ok):
+        """Record today's install result, so a failure is retried tomorrow."""
+        try:
+            flag = Path(tempfile.gettempdir()) / "audiovault_edge_tts_tried.txt"
+            today = time.strftime("%Y-%m-%d")
+            flag.write_text(today + (":ok" if ok else ":fail"))
+        except Exception:
+            pass
 
     def _say_in_samantha_voice(self, text):
         """Read dynamic text in Samantha's reading voice, not NVDA's.
@@ -4985,31 +5336,69 @@ class PlayerFrame(wx.Frame):
         list." So when the reading voice is not installed yet,
         Samantha says so herself in her own recorded voice
         (sounds/samantha_reading_not_ready.wav) instead of
-        falling back to NVDA, and the app tries once more to
-        get the reading voice installed. NVDA quiet stays on
-        the whole time. Returns after starting the reading (it
-        plays in the background); the _samantha_reading flag
-        stays up while it plays so listening does not hear
-        Samantha's own voice as a command, and so nothing
-        else talks over her.
+        falling back to NVDA. NVDA quiet stays on the whole
+        time. Returns after starting the reading (it plays in
+        the background); the _samantha_reading flag stays up
+        while it plays so listening does not hear Samantha's
+        own voice as a command, and so nothing else talks
+        over her. The "not ready" clip itself is queued behind
+        any clip still playing, so it never talks over her
+        either, and it is said once per failed install — the
+        old code replayed it on every single ask.
         """
         if not text:
             return
         mode = self._samantha_voice_mode()
         if mode == "edge":
+            # Set the flag here, on the main thread, before the
+            # synthesis thread starts: the old code only set it
+            # inside the thread, so a check a moment later (the
+            # guide waiting for the list, listening re-arming)
+            # could see it clear and talk over the reading.
+            self._samantha_reading = True
             threading.Thread(target=self._edge_tts_read,
                              args=(text,), daemon=True).start()
             return
-        # No reading voice yet: Samantha says so herself.
-        # Never NVDA, never Microsoft.
+        # No reading voice yet. Never NVDA, never Microsoft.
         self._samantha_reading = True
-        self._play_sound_effect("samantha_reading_not_ready.wav")
-        wx.CallLater(5500, setattr, self, "_samantha_reading", False)
-        if not getattr(self, "_edge_install_retried", False):
-            self._edge_install_retried = True
-            self._samantha_voice_mode_cache = "unset"
+        state = getattr(self, "_edge_install_state", "unknown")
+        if state in ("installing", "checking"):
+            # The install is already running — she asked in the
+            # middle of it. Remember what she asked for and read
+            # it when the voice is ready (see
+            # _on_edge_install_ready), instead of saying "not
+            # ready" for something that is about to be ready.
+            # "I'm on it" tells her Samantha heard her.
+            self._pending_reading_text = text
+            self._queue_samantha_sound(
+                "samantha_im_on_it.wav",
+                after=self._clear_samantha_reading)
+            return
+        if self._edge_install_should_retry():
+            # Nothing is installing and the last try was a while
+            # ago (or there never was one): try again now, in
+            # the background, and read her the list when it is
+            # ready. The old code only ever retried once per run
+            # and then said "not ready" for the rest of the run.
+            self._pending_reading_text = text
             threading.Thread(target=self._ensure_edge_tts,
                              daemon=True).start()
+            self._queue_samantha_sound(
+                "samantha_im_on_it.wav",
+                after=self._clear_samantha_reading)
+            return
+        # A try just failed, very recently: say so once for that
+        # failure, in her own recorded voice, and then stay quiet
+        # until the next try.
+        if (getattr(self, "_edge_install_not_ready_said", 0)
+                != getattr(self, "_edge_install_fail_count", 0)):
+            self._edge_install_not_ready_said = \
+                self._edge_install_fail_count
+            self._play_samantha_sequence(
+                ["samantha_reading_not_ready.wav"],
+                after=self._clear_samantha_reading)
+        else:
+            wx.CallLater(1000, self._clear_samantha_reading)
 
     def _edge_tts_read(self, text):
         """Synthesize text with Edge TTS and play it (thread)."""
@@ -5019,8 +5408,22 @@ class PlayerFrame(wx.Frame):
             path = str(Path(tempfile.gettempdir())
                        / f"samantha_read_{int(time.time() * 1000) % 100000}.mp3")
             self._samantha_reading = True
-            asyncio.run(
-                edge_tts.Communicate(text, "en-US-AriaNeural").save(path))
+            # Edge TTS synthesises over the internet, so a slow
+            # moment can fail once and work a few seconds later.
+            # Try twice before giving up, instead of saying "not
+            # ready" on the first blip.
+            last_error = None
+            for _attempt in (1, 2):
+                try:
+                    asyncio.run(
+                        edge_tts.Communicate(text, "en-US-AriaNeural").save(path))
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    time.sleep(3)
+            if last_error is not None:
+                raise last_error
             # One voice at a time: wait for any Samantha
             # recording that is still playing ("I'm on it",
             # the guide intro, the greeting) to finish, so
@@ -5042,70 +5445,175 @@ class PlayerFrame(wx.Frame):
             # Edge TTS failed (no internet, library problem):
             # Samantha says her reading voice isn't ready, in
             # her own voice. Never NVDA for the list, never
-            # Microsoft. _samantha_reading stays up until the
-            # clip finishes, so nothing talks over her.
-            wx.CallAfter(self._play_sound_effect,
-                         "samantha_reading_not_ready.wav")
-            wx.CallAfter(
-                lambda: wx.CallLater(
-                    5500, setattr, self, "_samantha_reading", False))
+            # Microsoft. Queued behind any clip still playing,
+            # so it never talks over her, and _samantha_reading
+            # stays up until the clip finishes.
+            wx.CallAfter(self._play_samantha_sequence,
+                         ["samantha_reading_not_ready.wav"],
+                         after=self._clear_samantha_reading)
 
     def _ensure_edge_tts(self):
         """Get Samantha's reading voice ready, in the background.
 
-        Ashley, 2026-11-26: she heard Microsoft's voice read
-        the list and does not want Microsoft at all, and she
-        does not want NVDA reading it either — she wants
-        Samantha. The reading voice is Edge TTS, but that
-        library was not installed on her PC (that is why the
-        Microsoft voice was used instead). So when the app
-        opens, it tries to install edge-tts itself (python -m
-        pip install edge-tts), in a background thread that
-        never blocks the app and shows no window. If it works,
-        the next reading uses Samantha's reading voice. If it
-        fails (no internet, no pip), nothing breaks — Samantha
-        says her reading voice isn't ready yet, in her own
-        voice, and the install is tried again the next time
-        the app opens (a failed try is not counted as done).
+        Ashley, 2026-11-26: she kept hearing "My reading voice
+        isn't ready yet" instead of the list, and she does not
+        know how to get that voice set up. The old code ran a
+        silent `python -m pip install edge-tts` once at startup
+        and never told her anything: if it was still running
+        when she asked, if it failed, or if it had already
+        failed, she just heard "not ready" again, with no
+        retry and no way to check. Now:
+        - If edge-tts already imports, nothing is installed at
+          all — the old code re-ran pip on nearly every start.
+        - Only one install ever runs at a time, and a failed
+          try is logged (last lines of pip's own error) instead
+          of vanishing.
+        - An install that finishes is verified by importing
+          edge-tts again; only then does it count as ready.
+        - While it installs, asking for the list says "I'm on
+          it" and the list is read when the voice is ready (see
+          _say_in_samantha_voice). When it fails, Samantha says
+          "not ready" once for that failure, and the next ask
+          tries again.
+        - One manual step, if the background install keeps
+          failing: open Command Prompt in the Audio Vault TV
+          folder and run `python -m pip install edge-tts`,
+          then close and reopen Audio Vault TV. No NVDA and no
+          Microsoft voice is ever used instead.
         """
+        lock = getattr(self, "_edge_install_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if getattr(self, "_edge_install_running", False):
+                return
+            self._edge_install_running = True
         try:
-            flag = Path(tempfile.gettempdir()) / "audiovault_edge_tts_tried.txt"
-            today = time.strftime("%Y-%m-%d")
-            if flag.exists():
-                try:
-                    # Only a successful install counts as done
-                    # for today; a failed try is retried.
-                    if flag.read_text().strip() == today + ":ok":
-                        return
-                except Exception:
-                    pass
+            self._edge_install_state = "checking"
+            if self._edge_import_ok():
+                self._edge_install_state = "ready"
+                self._samantha_voice_mode_cache = "edge"
+                self._write_edge_flag(True)
+                wx.CallAfter(self._on_edge_install_ready)
+                return
+            self._edge_install_state = "installing"
+            self._edge_install_last_try = time.time()
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             else:
                 startupinfo = None
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "edge-tts"],
-                capture_output=True, timeout=300,
-                startupinfo=startupinfo)
             try:
-                flag.write_text(today + (":ok" if result.returncode == 0
-                                         else ":fail"))
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "edge-tts"],
+                    capture_output=True, text=True, timeout=300,
+                    startupinfo=startupinfo)
+                pip_ok = result.returncode == 0
+                pip_tail = ((result.stderr or result.stdout or "")
+                            .strip().splitlines()[-5:])
+            except subprocess.TimeoutExpired:
+                pip_ok = False
+                pip_tail = ["pip install edge-tts timed out after 5 minutes"]
+            except Exception as e:
+                pip_ok = False
+                pip_tail = [f"could not run pip: {e}"]
+            if pip_ok and self._edge_import_ok():
+                self._edge_install_state = "ready"
+                self._samantha_voice_mode_cache = "edge"
+                self._write_edge_flag(True)
+                wx.CallAfter(self._on_edge_install_ready)
+                return
+            self._edge_install_state = "failed"
+            self._edge_install_fail_count = \
+                getattr(self, "_edge_install_fail_count", 0) + 1
+            self._write_edge_flag(False)
+            try:
+                self.logger.log_error(
+                    "EDGE-TTS install failed: " + " | ".join(pip_tail))
             except Exception:
                 pass
-            # Installed (or already there): let the next
-            # reading re-check and use it.
-            self._samantha_voice_mode_cache = "unset"
-        except Exception:
-            pass
+            wx.CallAfter(self._on_edge_install_failed)
+        finally:
+            self._edge_install_running = False
 
-    def _play_dynamic_wav(self, path, words):
-        """Play a synthesized reading file, then delete it."""
+    def _on_edge_install_ready(self):
+        """The reading voice is ready (main thread).
+
+        If Ashley asked for a reading while it installed, read
+        it to her now — she should not have to ask again. If she
+        asked for the voice itself (menu / "install my reading
+        voice"), say so in the reading voice.
+        """
+        pending = getattr(self, "_pending_reading_text", None)
+        self._pending_reading_text = None
+        if pending:
+            self._say_in_samantha_voice(pending)
+            return
+        if getattr(self, "_edge_install_explicit", False):
+            self._edge_install_explicit = False
+            self._say_in_samantha_voice(
+                "My reading voice is ready now. "
+                "Ask me to list your shows.")
+
+    def _on_edge_install_failed(self):
+        """The install failed (main thread).
+
+        If Ashley is waiting for a reading, say "not ready" once
+        for this failure, in her own recorded voice — never NVDA,
+        never Microsoft. Otherwise stay quiet: the next time she
+        asks, she will hear it once, and a new try will start.
+        """
+        self._edge_install_explicit = False
+        pending = getattr(self, "_pending_reading_text", None)
+        self._pending_reading_text = None
+        if pending:
+            self._edge_install_not_ready_said = \
+                getattr(self, "_edge_install_fail_count", 0)
+            self._samantha_reading = True
+            self._play_samantha_sequence(
+                ["samantha_reading_not_ready.wav"],
+                after=self._clear_samantha_reading)
+
+    def _on_install_reading_voice(self, event=None):
+        """Menu / voice: get Samantha's reading voice ready.
+
+        Ashley, 2026-11-26: she does not know how to get the
+        reading voice set up, and the silent background install
+        gave her nothing to check. This is the one checkable
+        step in the app: Samantha says "I'm on it", the install
+        runs in the background, and when it is ready she says
+        so in the reading voice; if it fails she says her
+        reading voice isn't ready yet. If it keeps failing, the
+        one manual step is: Command Prompt in the Audio Vault TV
+        folder, `python -m pip install edge-tts`, then close and
+        reopen Audio Vault TV.
+        """
+        self._edge_install_explicit = True
+        self.status_label.SetLabel("Getting Samantha's reading voice ready...")
+        self._play_sound_effect("samantha_im_on_it.wav")
+        threading.Thread(target=self._ensure_edge_tts, daemon=True).start()
+
+    def _play_dynamic_wav(self, path, words, _retry=0):
+        """Play a synthesized reading file, then delete it.
+
+        Ashley, 2026-11-26: readings talked over Samantha's
+        clips, because this played on a fresh channel every
+        time. Now it plays on Samantha's one dedicated channel,
+        and waits until that channel is free — up to about 12
+        seconds — instead of starting over a clip. Shows keep
+        playing: they use mixer.music, not this channel.
+        """
         try:
             import pygame
-            pygame.mixer.init()
+            channel = self._samantha_channel()
+            if channel.get_busy():
+                if _retry < 40:
+                    wx.CallLater(300, self._play_dynamic_wav,
+                                 path, words, _retry + 1)
+                    return
+                channel.stop()
             sound = pygame.mixer.Sound(path)
-            sound.play()
+            channel.play(sound)
         except Exception:
             pass
         # Reading takes about 150 words a minute; clear the
@@ -5176,8 +5684,26 @@ class PlayerFrame(wx.Frame):
         Both readings go through Samantha's voice (see
         _say_in_samantha_voice), and NVDA quiet is never
         turned off for a reading — NVDA never reads the list.
+        The guide waits until the list reading has actually
+        finished (see _speak_tv_guide_when_free): the old code
+        started the list and the guide in the same breath, so
+        the guide intro talked over the list.
         """
         self._speak_show_list()
+        wx.CallLater(500, self._speak_tv_guide_when_free)
+
+    def _speak_tv_guide_when_free(self, _waited_ms=0):
+        """Read the TV guide once Samantha has finished the list.
+
+        _samantha_reading stays up while a reading (or the
+        "not ready" clip) is playing. Wait for it, up to a
+        minute, then read the guide anyway, so she is never
+        left with no guide at all.
+        """
+        if getattr(self, "_samantha_reading", False) and _waited_ms < 60000:
+            wx.CallLater(1000, self._speak_tv_guide_when_free,
+                         _waited_ms + 1000)
+            return
         self._speak_tv_guide()
 
     def _speak_tv_guide(self, event=None):
@@ -5251,7 +5777,7 @@ class PlayerFrame(wx.Frame):
             msg = (f"I couldn't find a channel called {query}, so I didn't delete anything."
                    if query else "No channel is selected, so I didn't delete anything.")
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg, "samantha_reading_not_ready.wav")
             return
         data = self.channels.channels.get(name, {})
         folders = data.get("folders") or []
@@ -5288,7 +5814,7 @@ class PlayerFrame(wx.Frame):
             if result != wx.YES:
                 msg = f"Okay, I left {name} alone."
                 self.status_label.SetLabel(msg)
-                speak(msg)
+                self._answer_in_samantha_voice(msg)
                 return
         try:
             self.player.stop()
@@ -5309,7 +5835,7 @@ class PlayerFrame(wx.Frame):
         self._update_title()
         msg = f"Removed {name}. Deleted {deleted} downloaded file(s)."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         self.logger.log_channel("DELETE-DOWNLOADS", name, f"deleted {deleted} file(s)")
 
 
@@ -5513,7 +6039,7 @@ class PlayerFrame(wx.Frame):
         self._livetv_last_channel = channel
         msg = f"Tuning in to {name}..."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         self.logger.log_playback("LIVETV", f"Play: {name} ({channel['id']}) {channel['url']}")
         try:
             self.livetv_process = livetv.start_stream(channel["url"])
@@ -5532,7 +6058,7 @@ class PlayerFrame(wx.Frame):
         self._livetv_last_channel = None
         msg = "Live TV stopped"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         self._update_title()
 
     def _livetv_stop_stream(self):
@@ -5583,11 +6109,11 @@ class PlayerFrame(wx.Frame):
     def _livetv_refresh_done(self, count):
         msg = f"Live channel list refreshed: {count} channels available."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
 
     def _livetv_error(self, message):
         self.status_label.SetLabel(message)
-        speak(message)
+        self._answer_in_samantha_voice(message, "samantha_reading_not_ready.wav")
         self.logger.log_error(f"LIVETV: {message}")
 
     def _on_quick_quit(self, event):

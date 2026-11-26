@@ -100,6 +100,20 @@ class VoiceControl:
         # for anything that only knows the one name.
         self.wake_words = ("samantha", "sammy", "sam",
                            "guide", "metro")
+        # Load the Vosk model now, so a missing model fails here
+        # — main.py then says "Voice control not available" —
+        # instead of listening and silently returning nothing.
+        # (This block used to sit after a `return` in
+        # _strip_wake_word, where it could never run at all, so
+        # the model was never loaded and listen() always
+        # returned None. The typed-command parser in main.py
+        # builds a bare parser when VoiceControl() raises, so
+        # typing still works with no model.)
+        if self.model_path.exists():
+            self.model = Model(str(self.model_path))
+            self.recognizer = KaldiRecognizer(self.model, 16000)
+        else:
+            raise FileNotFoundError(f"Vosk model not found at {model_path}")
 
     def _find_wake_word(self, text):
         """Which wake word is in this text, or None.
@@ -116,13 +130,6 @@ class VoiceControl:
         return re.sub(
             r"^(?:hey\s+)?(?:samantha|sammy|sam|guide|metro)[,\s]+",
             "", text.strip())
-
-        # Initialize model
-        if self.model_path.exists():
-            self.model = Model(str(self.model_path))
-            self.recognizer = KaldiRecognizer(self.model, 16000)
-        else:
-            raise FileNotFoundError(f"Vosk model not found at {model_path}")
 
     def audio_callback(self, indata, frames, time, status):
         """Callback for audio stream"""
@@ -353,6 +360,17 @@ class VoiceControl:
                 r"|\bare you listening\b|\bcan you hear us\b",
                 text):
             return 'can_you_hear_me'
+
+        # --- Install the reading voice: Ashley, 2026-11-26.
+        # "install my reading voice" / "get my reading voice
+        # ready" — the one checkable step in the app for the
+        # Edge TTS reading voice. Checked before search/play so
+        # it is not treated as a show search.
+        if re.search(
+                r"\b(?:install|get|set up|setup|fix)\b.*\breading voice\b"
+                r"|\breading voice\b.*\b(?:ready|install|set up|setup)\b",
+                text):
+            return 'install_reading_voice'
 
         # --- List shows: Ashley, 2026-11-26. "What are my
         # options?" / "tell me the list of shows I have so I
