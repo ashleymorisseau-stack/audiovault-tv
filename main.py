@@ -8,6 +8,7 @@ import os
 import json
 import threading
 import subprocess
+import tempfile
 from pathlib import Path
 
 print("Loading audio player...", flush=True)
@@ -56,11 +57,77 @@ except Exception:
 
 def speak(text):
     """Speak text through NVDA if available"""
+    # Ashley, 2026-11-26: while NVDA quiet mode is on, nothing is
+    # spoken through NVDA at all — not even the app's own messages.
+    # Samantha's recorded voice and the shows still play, because
+    # they go through pygame, not NVDA.
+    if _NVDA_QUIET:
+        return
     if NVDA_AVAILABLE and nvda:
         try:
             nvda.nvdaController_speakText(text)
         except Exception:
             pass
+
+
+# NVDA quiet mode — Ashley, 2026-11-26:
+# "I just want it to stop talking while I'm in the app. But if I
+# close the app I want it to talk."
+# NVDA's sleep mode (NVDA+Shift+S) stops all NVDA speech and braille
+# for the current app only, and NVDA talks again as soon as she is in
+# another app. The controller DLL has no sleep function, so the app
+# presses that key itself (NVDA key is Insert on her PC) while its own
+# window is focused. NVDA only keeps sleep mode until NVDA restarts.
+# A marker file in the temp folder remembers when quiet was left on
+# (for example the app crashed before it could turn it back off), so
+# the next start does not press the key a second time and turn it
+# back off by mistake. Manual version, any time: press NVDA+Shift+S
+# while AudioVault TV is focused; Ctrl+Shift+Q in the app flips it too.
+# Honest limit: this is a blind keypress toggle — NVDA gives the app no
+# way to ask whether sleep is already on. If her NVDA key ever changes
+# from Insert, the keypress will do nothing and she should press
+# NVDA+Shift+S herself once instead.
+_NVDA_QUIET = False
+_NVDA_QUIET_MARKER = Path(tempfile.gettempdir()) / "audiovault_tv_nvda_quiet"
+
+
+def _press_nvda_sleep_toggle():
+    """Press NVDA+Shift+S (desktop layout, NVDA key is Insert)."""
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        VK_SHIFT = 0x10
+        VK_INSERT = 0x2D
+        KEYEVENTF_KEYUP = 0x0002
+        for vk in (VK_SHIFT, VK_INSERT, 0x53):  # Shift, Insert, S
+            user32.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.05)
+        for vk in (0x53, VK_INSERT, VK_SHIFT):
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+def set_nvda_quiet(on):
+    """Turn NVDA quiet (sleep) mode for this app on or off."""
+    global _NVDA_QUIET
+    if on == _NVDA_QUIET:
+        return _NVDA_QUIET
+    if not NVDA_AVAILABLE:
+        return False
+    if not _press_nvda_sleep_toggle():
+        return False
+    _NVDA_QUIET = on
+    try:
+        if on:
+            _NVDA_QUIET_MARKER.write_text("on")
+        else:
+            _NVDA_QUIET_MARKER.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return _NVDA_QUIET
 
 
 class _YTDownloadCancelled(Exception):
@@ -151,6 +218,12 @@ class PlayerFrame(wx.Frame):
         
         # Show greeting dialog after a short delay
         wx.CallLater(1000, self._show_greeting_dialog)
+
+        # Ashley, 2026-11-26: quiet NVDA shortly after the window
+        # opens, so it stops talking while she is in the app. Samantha
+        # still greets her in her own voice at 1000 ms — that plays
+        # through pygame, not NVDA, so quiet mode does not silence it.
+        wx.CallLater(500, self._enable_nvda_quiet)
     
     def _create_ui(self):
         """Create accessible UI with menu bar"""
@@ -229,6 +302,9 @@ class PlayerFrame(wx.Frame):
         controls_menu.AppendSeparator()
         toggle_sounds_item = controls_menu.Append(wx.ID_ANY, "Toggle Sounds\tCtrl+Shift+S", "Turn startup/exit sounds on or off")
         self.Bind(wx.EVT_MENU, self._toggle_sounds, toggle_sounds_item)
+        nvda_quiet_item = controls_menu.AppendCheckItem(wx.ID_ANY, "NVDA Quiet While In App\tCtrl+Shift+Q", "Stop NVDA talking while you are in AudioVault TV; NVDA talks again when you close the app")
+        self.Bind(wx.EVT_MENU, self._on_toggle_nvda_quiet, nvda_quiet_item)
+        self._nvda_quiet_menu_item = nvda_quiet_item
         set_name_item = controls_menu.Append(wx.ID_ANY, "Set My Name", "Set your name for personalized messages")
         self.Bind(wx.EVT_MENU, self._on_set_name, set_name_item)
         controls_menu.AppendSeparator()
@@ -342,6 +418,8 @@ class PlayerFrame(wx.Frame):
                 self._prev_channel()
             else:
                 self._next_channel()
+        elif keycode == ord('Q') and ctrl and shift:
+            self._on_toggle_nvda_quiet()
         elif keycode == ord('B') and ctrl and shift:
             self._toggle_voice_listening()
         elif keycode == ord('W') and ctrl and shift:
@@ -1646,6 +1724,73 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
 
+    def _enable_nvda_quiet(self):
+        """Quiet NVDA for this app after the window opens.
+
+        Ashley, 2026-11-26: NVDA should stop talking while she is in
+        AudioVault TV and talk again when she closes it. The window is
+        brought to the front first, because the sleep keypress only
+        affects the focused app. If a marker file says a previous run
+        left quiet on (the app crashed before it could turn it back
+        off), NVDA is probably still asleep for this app, so the key
+        is not pressed again — pressing it again would wake NVDA up.
+        """
+        global _NVDA_QUIET
+        if not NVDA_AVAILABLE:
+            return
+        try:
+            self.Raise()
+            self.SetFocus()
+        except Exception:
+            pass
+        if _NVDA_QUIET_MARKER.exists():
+            _NVDA_QUIET = True
+            try:
+                self._nvda_quiet_menu_item.Check(True)
+            except Exception:
+                pass
+            self.logger.log_playback("NVDA", "Quiet mode already on from previous run; key not pressed again")
+            return
+        if set_nvda_quiet(True):
+            try:
+                self._nvda_quiet_menu_item.Check(True)
+            except Exception:
+                pass
+            self.logger.log_playback("NVDA", "Quiet mode on: NVDA sleeps while in AudioVault TV")
+
+    def _disable_nvda_quiet(self):
+        """Turn NVDA back on when the app closes, if it was quieted."""
+        if _NVDA_QUIET:
+            set_nvda_quiet(False)
+            try:
+                self._nvda_quiet_menu_item.Check(False)
+            except Exception:
+                pass
+
+    def _on_toggle_nvda_quiet(self, event=None):
+        """Flip NVDA quiet mode from the menu or Ctrl+Shift+Q."""
+        global _NVDA_QUIET
+        if _NVDA_QUIET:
+            set_nvda_quiet(False)
+            try:
+                self._nvda_quiet_menu_item.Check(False)
+            except Exception:
+                pass
+            speak("NVDA is back on. I will talk in Audio Vault TV again.")
+        else:
+            if NVDA_AVAILABLE and nvda:
+                try:
+                    nvda.nvdaController_cancelSpeech()
+                except Exception:
+                    pass
+            set_nvda_quiet(True)
+            try:
+                self._nvda_quiet_menu_item.Check(True)
+            except Exception:
+                pass
+            # No speak() here on purpose — NVDA is quiet now, and
+            # Samantha's voice and the shows are unaffected.
+
     # ---- OneDrive "free up space" (online-only) support ----
 
     def _cloud_cleanup_enabled(self):
@@ -1841,43 +1986,28 @@ class PlayerFrame(wx.Frame):
                 print(f"Could not play sound effect {filename}: {e}")
     
     def _show_greeting_dialog(self):
-        """Show friendly greeting dialog"""
-        # Ashley, 2026-11-26: Samantha asks how she is doing in
-        # her own recorded voice first, before the dialog appears
-        # for typing an answer.
+        """Samantha-only greeting, no pop-up dialog.
+
+        Ashley, 2026-11-26: NVDA kept saying "Greeting dialogue"
+        (and "pane") when this pop-up opened, and she does not want
+        NVDA to say anything here. So there is no dialog any more:
+        Samantha asks how she is doing in her own recorded voice,
+        NVDA speech is cancelled first so it does not talk over
+        her, and nothing is spoken through NVDA. The current
+        channel is already loaded at startup, so she can just
+        press Space to play, or use a voice command to pick a
+        channel — no typing in a dialog is needed.
+        """
+        # Stop any NVDA speech in progress, so Samantha is the
+        # only voice she hears for the greeting.
+        if NVDA_AVAILABLE and nvda:
+            try:
+                nvda.nvdaController_cancelSpeech()
+            except Exception:
+                pass
         self._play_sound_effect("samantha_how_are_you_doing.wav")
-        # First question: How are you doing?
-        dlg = wx.TextEntryDialog(
-            self,
-            "How are you doing, sweetie? (Reminder: make sure your external drive is plugged in!)",
-            "Greeting",
-            ""
-        )
-        
-        result = dlg.ShowModal()
-        response = dlg.GetValue().strip().lower()
-        dlg.Destroy()
-        
-        if result == wx.ID_CANCEL:
-            return
-        
-        # Check response - check for negative words first
-        negative_words = ['not', 'bad', 'terrible', 'awful', 'sad', 'depressed', 'angry', 'upset', 'horrible', 'poor', 'sick']
-        positive_words = ['good', 'great', 'fine', 'well', 'excellent', 'wonderful', 'fantastic', 'amazing', 'happy', 'ok', 'okay']
-        
-        has_negative = any(word in response for word in negative_words)
-        has_positive = any(word in response for word in positive_words)
-        
-        # If has negative words, treat as negative even if positive words present
-        if has_negative:
-            message = "I'm sorry to hear that. I hope you have a better day. What shows would you like to watch?"
-        elif has_positive:
-            message = "Good! Fantastic! What shows would you like to watch?"
-        else:
-            message = "What shows would you like to watch?"
-        
-        # Show response and ask for channel in one dialog
-        self._ask_channel_to_play(message)
+        self.status_label.SetLabel(
+            "Hi Sweetie! How are you doing? What do you want to watch?")
     
     def _ask_channel_to_play(self, prompt_message):
         """Ask which channel to play"""
@@ -4555,8 +4685,10 @@ class PlayerFrame(wx.Frame):
         self.player.stop()
         self.timer.Stop()
         self._livetv_stop_stream()
+        # Ashley, 2026-11-26: NVDA talks again when the app closes.
+        self._disable_nvda_quiet()
         self.Destroy()
-    
+
     def _on_close(self, event):
         """Handle window close"""
         try:
@@ -4573,7 +4705,10 @@ class PlayerFrame(wx.Frame):
         self.player.stop()
         self.timer.Stop()
         self._livetv_stop_stream()
-        
+
+        # Ashley, 2026-11-26: NVDA talks again when the app closes.
+        self._disable_nvda_quiet()
+
         # Play outro sound and wait for it to finish
         if self._play_outro_sound():
             # Check every 100ms if outro is still playing
