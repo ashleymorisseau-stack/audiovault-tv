@@ -125,6 +125,31 @@ One voice at a time: a reading now waits for any Samantha recording that is stil
 
 One honest note: you have not heard the Aria reading voice yet — no sample of one could be made from here — so if you do not like how it sounds, say so and the voice will be changed. It is one line in the code.
 
+## The App Installs Everything It Needs Itself — No Command Prompt
+
+Ashley asked: whatever requirements she needs for Command Prompt, the app should just get them and install them itself, so she never has to do it in Command Prompt. That is now how the app works, for everything it needs — not just the reading voice.
+
+When the app opens, it checks for each library it needs and installs any that are missing, in the background, one at a time:
+
+- edge-tts — Samantha's reading voice, so she can read the list of shows.
+- vosk — voice listening, so Samantha can hear you.
+- sounddevice — the microphone, so listening has something to listen with.
+- pygame — playing sounds and shows.
+- requests — getting shows from AudioVault.
+- beautifulsoup4 — reading the show pages.
+- yt-dlp — YouTube search and downloads.
+- cloudscraper — getting shows (optional: the app already falls back to plain requests without it, so it never blocks the rest).
+
+wxPython is the one exception, and it has to be: the app cannot open at all without it, so there is no app yet to install it from — it has to come with the installer.
+
+How it works: the reading voice is installed first, then the rest, one pip install at a time — never two at once, so they cannot fight each other. Samantha says "I'm on it" in her own recorded voice while installs are running, so you hear it happening. When everything is ready she says so in the reading voice itself: "Everything is ready now. Ask me to list your shows." If something fails, she says the plain reason once — "there is no internet connection right now", "the disk is full", "Windows would not let the app write the files" — instead of going silent or repeating "not ready" forever, and the app tries again by itself every 1 minute. The full pip error still goes to the app log, so it can be found if it keeps failing.
+
+Three ways the old install failed silently, now fixed: first, the app used to run pip with its own program file as if it were Python — when the app runs as a built .exe, that file is not Python and has no pip, so the install failed at once with no message. Now it uses a real Python (its own, or the `py` launcher, or `python`), and if a Python has no pip at all it puts pip there first with ensurepip and tries again. Second, an unexpected error inside the install used to kill the background thread and leave the app stuck saying "I'm on it" forever, with no retry — now that counts as a failed try, with the reason logged and a retry in 1 minute. Third, a library that was missing when the app opened used to stop the whole app from starting, because its import ran at the top of the file before the installer could run at all — now those imports are guarded, the app opens, the install gets the library, and the app loads it afterwards, so the feature comes alive without restarting.
+
+You can also ask for it directly, any time: say or type "install everything I need" (or "get everything ready"), or use Controls, then "Install Everything I Need". That always forces a fresh try right now, even if a try just failed a moment ago. Samantha says "I'm on it", the installs run in the background one at a time, and she says when it is all ready. If everything is already ready, she just says so instead of installing again.
+
+There is no Command Prompt step for any of this any more. No NVDA or Microsoft voice is ever used for these announcements — Samantha's own voice only, her recorded clips while installing and her reading voice when it is ready.
+
 ## Type to Samantha — the Text Box
 
 There is a text box at the bottom of the window, labelled "Type to Samantha (press Enter)". It is there for when Samantha cannot hear you: type a command — "play Friends", "list shows", "what are my options" — and press Enter, and Samantha answers in her own voice, exactly as if you had spoken it. Tab reaches the box. Typing in the box never pauses playback or triggers the other hotkeys.
