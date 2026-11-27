@@ -1,9 +1,72 @@
 import json
 import queue
 import re
-import sounddevice as sd
-from vosk import Model, KaldiRecognizer
 from pathlib import Path
+
+
+# Ashley, 2026-11-27: voice_control used to import sounddevice and
+# vosk at the top level, so `import voice_control` failed with
+# ImportError whenever either library was missing on her PC — and
+# listening stayed off until the background pip install of both
+# succeeded. Now both are loaded lazily, only when they are
+# actually needed: vosk (Model / KaldiRecognizer) inside
+# VoiceControl.__init__, only when the model folder exists, and
+# sounddevice inside listen() / listen_for_wake_word(), only when
+# actually listening. Importing this file now always succeeds,
+# parsing is pure text and never needs either library, and
+# VoiceControl() fails cleanly — FileNotFoundError for a missing
+# model folder, ImportError with a plain reason for a missing
+# library — instead of failing at import time.
+_sd = None
+_Model = None
+_KaldiRecognizer = None
+
+
+def _load_vosk():
+    """Import vosk lazily; return (Model, KaldiRecognizer).
+
+    Raises ImportError with a plain reason when vosk is not
+    installed yet, so the caller can say so instead of crashing.
+    """
+    global _Model, _KaldiRecognizer
+    if _Model is not None and _KaldiRecognizer is not None:
+        return _Model, _KaldiRecognizer
+    from vosk import Model as _M, KaldiRecognizer as _K
+    _Model, _KaldiRecognizer = _M, _K
+    return _Model, _KaldiRecognizer
+
+
+def _load_sounddevice():
+    """Import sounddevice lazily; return the module.
+
+    Raises ImportError with a plain reason when sounddevice is
+    not installed yet, so the caller can say so instead of
+    crashing.
+    """
+    global _sd
+    if _sd is not None:
+        return _sd
+    import sounddevice as _module
+    _sd = _module
+    return _sd
+
+
+def __getattr__(name):
+    """Keep `voice_control.sd` / `.Model` / `.KaldiRecognizer`
+    working for anything that still reaches for them (for
+    example the test suite, which patches
+    `voice_control.sd.RawInputStream` to simulate a microphone
+    failure) — but load them lazily, only when actually asked
+    for, so merely importing this file never fails. A missing
+    library raises ImportError here, exactly as the old
+    top-level import did, but only for the code that asked.
+    """
+    if name == "sd":
+        return _load_sounddevice()
+    if name in ("Model", "KaldiRecognizer"):
+        _model, _recognizer = _load_vosk()
+        return _model if name == "Model" else _recognizer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _clean_query(query):
@@ -113,11 +176,21 @@ class VoiceControl:
         # returned None. The typed-command parser in main.py
         # builds a bare parser when VoiceControl() raises, so
         # typing still works with no model.)
-        if self.model_path.exists():
-            self.model = Model(str(self.model_path))
-            self.recognizer = KaldiRecognizer(self.model, 16000)
-        else:
+        # Ashley, 2026-11-27: vosk is imported lazily, only
+        # when the model folder exists — a missing folder still
+        # raises FileNotFoundError exactly as before, and a
+        # missing vosk library raises ImportError with a plain
+        # reason instead of failing at import time.
+        if not self.model_path.exists():
             raise FileNotFoundError(f"Vosk model not found at {model_path}")
+        try:
+            _Model, _KaldiRecognizer = _load_vosk()
+        except ImportError as e:
+            raise ImportError(
+                "Vosk is not installed yet, so Samantha cannot "
+                "listen yet") from e
+        self.model = _Model(str(self.model_path))
+        self.recognizer = _KaldiRecognizer(self.model, 16000)
 
     def _find_wake_word(self, text):
         """Which wake word is in this text, or None.
@@ -150,7 +223,12 @@ class VoiceControl:
         self.recognizer.Reset()
 
         try:
-            with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+            # Ashley, 2026-11-27: sounddevice is loaded lazily,
+            # only when actually listening. A missing library is
+            # caught by the except below, recorded in last_error,
+            # and returns None — it never crashes the app.
+            _sd_module = _load_sounddevice()
+            with _sd_module.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                                  channels=1, callback=self.audio_callback):
 
                 import time
@@ -214,7 +292,10 @@ class VoiceControl:
         self.recognizer.Reset()
 
         try:
-            with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+            # Ashley, 2026-11-27: sounddevice is loaded lazily,
+            # only when actually listening (see listen()).
+            _sd_module = _load_sounddevice()
+            with _sd_module.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
                                  channels=1, callback=self.audio_callback):
 
                 while self.wake_word_active:
