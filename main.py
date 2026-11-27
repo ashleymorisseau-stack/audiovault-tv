@@ -1542,27 +1542,15 @@ class PlayerFrame(wx.Frame):
                         # channel and once for the file.
                         channel_name = self.channels.current_channel or ""
                         now_file = self.playlist.get_current_file_name()
-                        now_show = self._spoken_show(now_file)
-                        msg = self._spoken_playing_msg(now_file, channel_name)
+                        # Ashley, 2026-11-27, smoother TV guide:
+                        # one flowing announcement, not three
+                        # separate bits with gaps between them —
+                        # what is playing, the marathon, then
+                        # what comes up next, all in one breath.
+                        msg = self._smooth_advance_text(
+                            now_file, channel_name)
                         self.status_label.SetLabel(msg)
                         speak(msg)
-                        # TV guide, automatic: say what comes up
-                        # after this one, so Honey always knows
-                        # what is next without asking.
-                        coming = self.playlist.peek_next_file_name()
-                        if coming:
-                            speak("Coming up next: "
-                                  + self._spoken_episode(coming, now_show))
-                        else:
-                            nxt_ch = self.channels.peek_next_channel()
-                            if nxt_ch:
-                                speak(f"Coming up next: {nxt_ch}")
-                        # Marathon starting: this file begins three
-                        # or more of the same show in a row.
-                        if self._marathon_starting():
-                            show_name = self._spoken_show(
-                                self.playlist.get_current_file_name())
-                            speak(f"A marathon of {show_name} is starting.")
                         self._save_current_channel_state()
                     else:
                         # No more files in current channel
@@ -5568,6 +5556,43 @@ class PlayerFrame(wx.Frame):
             bits.append(title)
         return ", ".join(bits)
 
+    def _smooth_advance_text(self, now_file, channel_name=""):
+        """One smooth announcement for when a new file starts.
+
+        Ashley, 2026-11-27: "Make the TV guide more smoother."
+        The old auto-advance spoke in three separate bits, one
+        after another — "Playing: ...", then "Coming up next: ...",
+        then "A marathon of ... is starting." — with a gap and a
+        fresh start each time, and the marathon came last, after
+        the next episode had already been named. This builds the
+        whole thing as ONE flowing announcement, in the order
+        she hears it: what is playing now, then the marathon
+        (so the next episode is framed as part of it), then
+        what comes up next. One speak() call, no repeats, no
+        file paths, no ".mp3", no S01E02 codes, and the show
+        name is said once for the episode, not again for the
+        marathon — "It's a marathon" does not need the name
+        a second time.
+        """
+        show = self._spoken_show(now_file)
+        episode = self._spoken_episode(now_file)
+        parts = [f"Now playing {episode}."]
+        if self._marathon_starting():
+            parts.append(
+                "It's a marathon, so it will keep playing "
+                "through the whole series.")
+        coming = self.playlist.peek_next_file_name()
+        if coming:
+            parts.append(
+                "Coming up next is "
+                f"{self._spoken_episode(coming, show)}.")
+        else:
+            nxt_ch = self.channels.peek_next_channel()
+            if nxt_ch and nxt_ch != channel_name:
+                parts.append(
+                    f"After this, the next channel is {nxt_ch}.")
+        return " ".join(parts)
+
     @staticmethod
     def _spoken_playing_msg(file_name, channel_name=""):
         """'Playing: ...' in plain words, the show name said once.
@@ -5882,18 +5907,33 @@ class PlayerFrame(wx.Frame):
         else:
             return "Nothing is playing right now."
         marathon = self._marathon_ahead()
-        if marathon:
+        nxt_file = self.playlist.peek_next_file_name()
+        handled_next = False
+        if marathon and nxt_file:
+            # Ashley, 2026-11-27, smoother TV guide: do not say
+            # "coming up next" twice in a row — once for the
+            # marathon and once for the next episode. Fold them
+            # into one flowing sentence instead.
+            parts.append(
+                f"Coming up next is a marathon of {marathon}, "
+                f"starting with "
+                f"{self._spoken_episode(nxt_file, marathon)}.")
+            said_show = marathon
+            handled_next = True
+            nxt_ch = self.channels.peek_next_channel()
+            if nxt_ch and nxt_ch != channel:
+                parts.append(f"After that, the next channel is {nxt_ch}.")
+        elif marathon:
             parts.append(f"A marathon of {marathon} is coming up next.")
             said_show = marathon
-        nxt_file = self.playlist.peek_next_file_name()
-        if nxt_file:
+        if not handled_next and nxt_file:
             parts.append(
                 "Coming up next: "
                 f"{self._spoken_episode(nxt_file, said_show)}.")
             nxt_ch = self.channels.peek_next_channel()
             if nxt_ch and nxt_ch != channel:
                 parts.append(f"After that, the next channel is {nxt_ch}.")
-        else:
+        elif not handled_next:
             nxt_ch = self.channels.peek_next_channel()
             if nxt_ch:
                 parts.append(
@@ -5907,7 +5947,8 @@ class PlayerFrame(wx.Frame):
         if others:
             bits = [f"on {ch}, a marathon of {show}"
                     for ch, show in others]
-            parts.append("Marathons coming up: " + "; ".join(bits) + ".")
+            parts.append("Later, marathons coming up: "
+                         + "; ".join(bits) + ".")
         return " ".join(parts)
 
     def _speak_channel_list(self):

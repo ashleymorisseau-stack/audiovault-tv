@@ -70,7 +70,7 @@ Samantha asks "Hi Sweetie! How are you doing? What do you want to watch?" in her
 
 - Samantha answers in her own recorded voice: "That's wonderful! I'm so glad you're doing good. What do you want to watch?" Her voice file is sounds/samantha_glad_youre_good.wav. NVDA does not repeat it.
 - Then, without you having to ask, she reads the list of shows you have, so you can tell her which one you want to watch.
-- Then she tells you what comes up next in the TV guide — including marathons, for example "A marathon of Classic Doctor Who is coming up next", or a marathon of Two and a Half Men, Friends, or Frasier, on whatever channels you have.
+- Then she tells you what comes up next in the TV guide — including marathons, folded into one smooth sentence, for example "Coming up next is a marathon of Classic Doctor Who, starting with season 1, episode 2, The Daleks", or a marathon of Two and a Half Men, Friends, or Frasier, on whatever channels you have.
 - Then tell her the channel you want, for example "play Friends" or "play Classic Doctor Who", and she will take you there.
 
 You can also ask for the list on its own, any time: "Samantha, list all the channels I have" or "what channels do I have".
@@ -231,7 +231,7 @@ A plain show search does live shows too, as well as AudioVault search and downlo
 
 ## TV Guide - What Is Coming Up Next
 
-Samantha reads the whole TV guide: what is playing now, what comes up next in this channel, and what channel comes after this one. She says "Here's what's coming up next!" in her own recorded voice first, then the guide itself is read in the app's usual speaking voice, because Samantha's voice is recordings and she cannot read new show names she never recorded. When one show finishes and the next one starts, she also says what is coming up after that one, without you asking. The guide also names marathons coming up on your other channels, for example a marathon of Classic Doctor Who, Two and a Half Men, Friends, or Frasier, not only a marathon on the channel playing right now. Live TV has no programme schedule, only channel names, so the live guide names the live channel now and the next live channels after it.
+Samantha reads the whole TV guide: what is playing now, what comes up next in this channel, and what channel comes after this one. She says "Here's what's coming up next!" in her own recorded voice first, then the guide itself is read in the app's usual speaking voice, because Samantha's voice is recordings and she cannot read new show names she never recorded. When one show finishes and the next one starts, she also says what is coming up after that one, without you asking — in one smooth announcement, not three separate bits: what is playing now, then the marathon, then what comes up next. The guide also names marathons coming up on your other channels, for example a marathon of Classic Doctor Who, Two and a Half Men, Friends, or Frasier, not only a marathon on the channel playing right now. Live TV has no programme schedule, only channel names, so the live guide names the live channel now and the next live channels after it.
 
 The guide only ever says clean show names, in plain words — never a file path, a backslash, a drive letter, or ".mp3", and never a file code like S01E02. For example, while Classic Doctor Who is playing: "Now playing Classic Doctor Who, season 1, episode 1, An Unearthly Child. Coming up next: season 1, episode 2, The Daleks. After that, the next channel is Friends." When the next episode is the same show, she says the show name once, not twice — "episode 2, The Daleks" — and when it is a different show she names it. The same goes for the list of shows, and for "Playing", "Paused", "Next file" and "Coming up next" announcements: only show names and episode numbers in words, never where the file lives on the computer.
 
@@ -259,7 +259,7 @@ Live TV has no programme schedule in its catalogue, only channel names, so this 
 
 ## Marathon Starting
 
-A marathon is three or more episodes of the same show in a row in one of your channels. When one is coming up, the TV guide says so: "A marathon of Doctor Who is coming up next." And when a marathon starts playing, Samantha says so right then: "A marathon of Doctor Who is starting." For live TV, marathons cannot be seen, because the live catalogue has no programme listings.
+A marathon is three or more episodes of the same show in a row in one of your channels. When one is coming up, the TV guide folds it into the coming-up-next sentence: "Coming up next is a marathon of Doctor Who, starting with season 1, episode 2, The Daleks." And when a marathon starts playing, the announcement says so in the same breath: "Now playing Doctor Who, season 1, episode 1. It's a marathon, so it will keep playing through the whole series. Coming up next is season 1, episode 2." For live TV, marathons cannot be seen, because the live catalogue has no programme listings.
 
 ## Fix Shows That Are Mixed Up
 
