@@ -31,6 +31,8 @@ import json
 import threading
 import subprocess
 import tempfile
+import shutil
+import zipfile
 from pathlib import Path
 
 try:
@@ -294,6 +296,22 @@ _REQUIRED_LIBRARIES = (
     ("cloudscraper", "cloudscraper", "getting shows", False),
 )
 
+# The Vosk listening model — Ashley, 2026-11-27: Samantha says
+# her reading voice is ready, but "she doesn't understand
+# anything". Listening (Vosk) and speaking (Edge TTS) are
+# separate: the reading voice being ready says nothing about
+# listening. Listening needs this model folder beside main.py,
+# and _ensure_requirements only ever pip-installed libraries —
+# it never downloaded the model itself. So the app now
+# downloads it itself, in the background, like the other
+# installs: no Command Prompt, no manual download. The zip is
+# about 40 MB from alphacephei.com (the Vosk model list).
+_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
+_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+# The download (zip) plus the extracted model need room: fail
+# plainly instead of filling the disk.
+_VOSK_MODEL_MIN_FREE_BYTES = 200_000_000
+
 
 class PlayerFrame(wx.Frame):
     def __init__(self):
@@ -405,6 +423,32 @@ class PlayerFrame(wx.Frame):
         # but the internet failed) says "not ready" once, not
         # on every ask, until a reading works again.
         self._edge_tts_read_failed_said = False
+        # Listening-model install state — ALL of it is defined
+        # BEFORE the startup install thread below is started,
+        # for the same reason as the edge state above: the
+        # thread chain (edge -> requirements -> model) must
+        # never run before the flags it needs exist.
+        # "unknown" / "checking" / "installing" / "ready" /
+        # "failed", like the reading-voice install.
+        self._vosk_model_state = "unknown"
+        self._vosk_model_running = False
+        self._vosk_model_lock = threading.Lock()
+        self._vosk_model_last_try = 0.0
+        self._vosk_model_fail_count = 0
+        self._vosk_model_not_ready_said = 0
+        self._vosk_model_last_reason = None
+        self._vosk_model_explicit = False
+        self._vosk_model_retry_timer = None
+        self._vosk_model_started_announced = False
+        # True once "I cannot hear you yet" has been said for
+        # the current install attempt, so the greeting does
+        # not repeat it on every retry (see
+        # _say_listening_not_ready). An explicit press of
+        # Ctrl+Shift+B / Ctrl+Shift+W always answers anyway.
+        self._listening_not_ready_announced = False
+        # Plain reason the microphone stream last failed with,
+        # if it did (see voice_control.listen / _voice_error).
+        self._voice_last_error = None
         # Get Samantha's reading voice ready in the background
         # (installs edge-tts itself if it is missing, and
         # retries on its own if a try fails — Ashley never
@@ -598,6 +642,8 @@ class PlayerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_set_name, set_name_item)
         install_voice_item = controls_menu.Append(wx.ID_ANY, "Install My Reading Voice", "Get Samantha's reading voice ready, so she can read the show list")
         self.Bind(wx.EVT_MENU, self._on_install_reading_voice, install_voice_item)
+        install_listen_item = controls_menu.Append(wx.ID_ANY, "Install the Listening Model", "Get Samantha listening, so she can hear your voice commands")
+        self.Bind(wx.EVT_MENU, self._on_install_listening_model, install_listen_item)
         install_all_item = controls_menu.Append(wx.ID_ANY, "Install Everything I Need", "Get everything Audio Vault TV needs — reading voice, voice listening, sound playing, getting shows — so nothing needs Command Prompt")
         self.Bind(wx.EVT_MENU, self._on_install_requirements, install_all_item)
         controls_menu.AppendSeparator()
@@ -1593,10 +1639,20 @@ class PlayerFrame(wx.Frame):
     def _toggle_voice_listening(self):
         """Toggle voice control listening"""
         if not self.voice_available:
-            msg = "Voice control not available. Check if Vosk model is installed."
-            self.status_label.SetLabel(msg)
-            speak(msg)
-            return
+            # Ashley, 2026-11-27: pressing Ctrl+Shift+B when
+            # listening is not available used to answer only
+            # with speak() — NVDA — which is silent while NVDA
+            # quiet is on, so she heard nothing at all. First
+            # try to create voice control now (the model may
+            # have appeared since startup); if that works,
+            # carry on and listen. Otherwise say so in
+            # Samantha's own voice (see
+            # _say_listening_not_ready), never NVDA.
+            if self._try_create_voice_control():
+                pass
+            else:
+                self._say_listening_not_ready(force=True)
+                return
         
         if self.is_voice_listening:
             # Stop listening
@@ -1605,8 +1661,10 @@ class PlayerFrame(wx.Frame):
             self.is_voice_listening = False
             self._play_end_chime()
             msg = "Voice control stopped"
-            self.status_label.SetLabel(msg)
-            speak(msg)
+            # In Samantha's voice, not NVDA speak(): NVDA is
+            # quiet in the app, so speak() would be silent.
+            self._answer_in_samantha_voice(
+                msg, "samantha_excuse_me.wav")
         else:
             # Start listening in a separate thread
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
@@ -1663,7 +1721,28 @@ class PlayerFrame(wx.Frame):
             
             # Play end sound, once only (see _play_end_chime)
             wx.CallAfter(self._play_end_chime)
-            
+
+            if not text:
+                # The microphone stream itself failed (see
+                # voice_control.listen, which records it in
+                # voice.last_error): say so as a voice error
+                # in Samantha's voice, with the plain reason,
+                # instead of "Excuse me" as if she had simply
+                # not spoken. Silence (no speech) has no
+                # last_error, so it still goes to
+                # _voice_no_command below.
+                last_error = getattr(self.voice, "last_error", None)
+                if last_error:
+                    try:
+                        self.voice.last_error = None
+                    except Exception:
+                        pass
+                    wx.CallAfter(
+                        self._voice_error,
+                        "the microphone could not be opened: "
+                        + str(last_error)[:200])
+                    return
+
             if text:
                 # A command was heard. Keep listening for the
                 # next one: re-arm 8 seconds later, once the
@@ -1907,9 +1986,35 @@ class PlayerFrame(wx.Frame):
             # me", Samantha answers in her own recorded voice:
             # "Yes, I can hear you." (sounds/samantha_yes_i_can.wav)
             # NVDA does not repeat it.
-            self._play_sound_effect("samantha_yes_i_can.wav")
-            msg = "Yes, I can hear you."
-            self.status_label.SetLabel(msg)
+            # Ashley, 2026-11-27: that answer was a lie when
+            # listening was not available at all — the reading
+            # voice being ready does not mean she can hear.
+            # Only say "Yes, I can" when voice_available is
+            # really True; otherwise say she cannot hear yet
+            # and why, in her own voice (see
+            # _say_listening_not_ready).
+            if self.voice_available:
+                self._play_sound_effect("samantha_yes_i_can.wav")
+                msg = "Yes, I can hear you."
+                self.status_label.SetLabel(msg)
+            else:
+                self._say_listening_not_ready(force=True)
+            return
+        elif command == 'listening_status':
+            # Ashley, 2026-11-27: "why can't you hear me" —
+            # Samantha tells her whether she can hear, and if
+            # not, why (model installing / missing / failed),
+            # in her own voice. Only "Yes, I can hear you"
+            # when listening is actually available.
+            self._say_listening_status()
+            return
+        elif command == 'install_listening_model':
+            # Ashley, 2026-11-27: "install the listening model"
+            # / "get Samantha listening" — the checkable step
+            # for listening, like "install my reading voice"
+            # is for the reading voice (see
+            # _on_install_listening_model).
+            self._on_install_listening_model()
             return
         elif command == 'install_reading_voice':
             # Ashley, 2026-11-26: "install my reading voice" —
@@ -2180,10 +2285,14 @@ class PlayerFrame(wx.Frame):
     def _toggle_wake_word_mode(self, event=None):
         """Toggle wake word listening mode"""
         if not self.voice_available:
-            msg = "Voice control not available. Check if Vosk model is installed."
-            self.status_label.SetLabel(msg)
-            speak(msg)
-            return
+            # Same as _toggle_voice_listening above: try to
+            # create voice control now, and if that fails say
+            # so in Samantha's voice, never silent NVDA.
+            if self._try_create_voice_control():
+                pass
+            else:
+                self._say_listening_not_ready(force=True)
+                return
         
         if self.wake_word_mode:
             # Stop wake word mode
@@ -2191,8 +2300,10 @@ class PlayerFrame(wx.Frame):
             self._wake_chimes_played = False
             self.voice.stop_listening()
             msg = "Wake word mode stopped"
-            self.status_label.SetLabel(msg)
-            speak(msg)
+            # In Samantha's voice, not NVDA speak(): NVDA is
+            # quiet in the app, so speak() would be silent.
+            self._answer_in_samantha_voice(
+                msg, "samantha_excuse_me.wav")
         else:
             # Start wake word mode
             # Honey asked 2026-11-23: the start bell should ring on the
@@ -2210,8 +2321,9 @@ class PlayerFrame(wx.Frame):
             # she answers to Samantha, Sam, Sammy, Guide, or Metro.
             msg = ("I'm listening. Say 'Samantha', 'Sam', 'Sammy', "
                    "'Guide', or 'Metro', followed by a command.")
-            self.status_label.SetLabel(msg)
-            speak(msg)
+            # In Samantha's voice, not NVDA speak(): NVDA is
+            # quiet in the app, so speak() would be silent.
+            self._answer_in_samantha_voice(msg)
 
             self.wake_word_thread = threading.Thread(target=self._wake_word_listen_thread, daemon=True)
             self.wake_word_thread.start()
@@ -3107,6 +3219,15 @@ class PlayerFrame(wx.Frame):
             wx.CallLater(2000, self._listen_after_greeting)
             return
         if not self.voice_available:
+            # Ashley, 2026-11-27: this used to return silently
+            # when listening was not available, so after the
+            # greeting Samantha just never listened and Ashley
+            # heard nothing about why. Say so once, in
+            # Samantha's own voice (see
+            # _say_listening_not_ready); when the model
+            # finishes installing, _on_vosk_model_ready
+            # starts listening from here.
+            self._say_listening_not_ready()
             return
         if self.is_voice_listening or self.wake_word_mode:
             return
@@ -5561,6 +5682,8 @@ class PlayerFrame(wx.Frame):
         """
         if getattr(self, "_edge_install_running", False):
             return False
+        if getattr(self, "_vosk_model_running", False):
+            return False
         if force:
             return True
         try:
@@ -6074,6 +6197,12 @@ class PlayerFrame(wx.Frame):
         force=True (an explicit "install my reading voice")
         skips the 60-second gap between tries.
         """
+        if getattr(self, "_vosk_model_running", False):
+            # The listening-model download is running: do not
+            # start a pip install at the same time. Retry by
+            # ourselves in a minute instead.
+            self._schedule_edge_install_retry()
+            return
         lock = getattr(self, "_edge_install_lock", None)
         if lock is None:
             lock = threading.Lock()
@@ -6380,6 +6509,8 @@ class PlayerFrame(wx.Frame):
             return False
         if getattr(self, "_edge_install_running", False):
             return False
+        if getattr(self, "_vosk_model_running", False):
+            return False
         if force:
             return True
         try:
@@ -6404,6 +6535,562 @@ class PlayerFrame(wx.Frame):
         except Exception:
             pass
 
+    # ---- Listening model (Vosk) ----
+    def _vosk_model_dir(self):
+        """Folder the Vosk listening model lives in, beside main.py."""
+        return Path(__file__).parent / _VOSK_MODEL_NAME
+
+    def _vosk_model_present(self):
+        """True when the listening model folder is really there.
+
+        A folder with nothing in it (a failed unzip) does not
+        count — VoiceControl would still fail on it.
+        """
+        try:
+            d = self._vosk_model_dir()
+            return d.is_dir() and any(d.iterdir())
+        except Exception:
+            return False
+
+    def _vosk_model_should_retry(self, force=False):
+        """True when a new model install attempt may start.
+
+        Never within a minute of the last try, so asking
+        twice in a row does not start two downloads.
+        force=True (an explicit "install the listening
+        model") skips the 60-second gap — she asked for it
+        now. A second install while one runs is already
+        prevented by _ensure_vosk_model's lock, so this
+        does NOT check _vosk_model_running itself: the
+        lock is set before this is called, and checking it
+        here would block every try, including the first.
+        Also never while a pip install is running (edge /
+        requirements): one install at a time, so they cannot
+        fight each other.
+        """
+        if (getattr(self, "_edge_install_running", False)
+                or getattr(self, "_requirements_running", False)):
+            return False
+        if force:
+            return True
+        try:
+            last = float(getattr(self, "_vosk_model_last_try", 0) or 0)
+        except Exception:
+            last = 0
+        return (time.time() - last) > 60
+
+    def _write_vosk_flag(self, ok):
+        """Record today's model install result, so a failure is retried."""
+        try:
+            flag = Path(tempfile.gettempdir()) / "audiovault_vosk_model_tried.txt"
+            today = time.strftime("%Y-%m-%d")
+            flag.write_text(today + (":ok" if ok else ":fail"))
+        except Exception:
+            pass
+
+    def _try_create_voice_control(self):
+        """Create VoiceControl() now, if it can be created.
+
+        Returns True when listening is available afterwards.
+        Used wherever voice control is needed — the toggles,
+        _reload_missing_modules, and the model install — so
+        a model that appears after startup is picked up
+        without restarting the app. A missing model is a
+        plain FileNotFoundError from VoiceControl(); a missing
+        vosk library is an ImportError. Neither is silent:
+        the reason is kept for "why can't you hear me".
+        """
+        global VoiceControl, VOICE_CONTROL_AVAILABLE
+        if getattr(self, "voice", None) is not None:
+            self.voice_available = True
+            return True
+        if VoiceControl is None:
+            try:
+                import voice_control as _vc
+                VoiceControl = _vc.VoiceControl
+                VOICE_CONTROL_AVAILABLE = True
+            except Exception as e:
+                self.voice_available = False
+                self._voice_last_error = str(e)[:200]
+                return False
+        try:
+            self.voice = VoiceControl(
+                model_path=str(self._vosk_model_dir()))
+            self.voice_available = True
+            return True
+        except FileNotFoundError:
+            self.voice = None
+            self.voice_available = False
+            if getattr(self, "_vosk_model_state", None) not in (
+                    "installing", "checking"):
+                self._vosk_model_last_reason = (
+                    "the listening model is not downloaded yet")
+            return False
+        except Exception as e:
+            self.voice = None
+            self.voice_available = False
+            self._voice_last_error = str(e)[:200]
+            try:
+                self.logger.log_error(
+                    "VOICE CONTROL: could not start listening: "
+                    + str(e)[:200])
+            except Exception:
+                pass
+            return False
+
+    def _announce_vosk_model_started(self):
+        """Samantha says she is getting listening ready.
+
+        Queued behind anything already playing (the startup
+        greeting), in her own recorded voice — "I'm on it" —
+        so Ashley hears the download is actually happening
+        instead of wondering in silence. Said once per try.
+        """
+        if getattr(self, "_vosk_model_state", None) != "installing":
+            return
+        if getattr(self, "_vosk_model_started_announced", False):
+            return
+        self._vosk_model_started_announced = True
+        try:
+            self._queue_samantha_sound("samantha_im_on_it.wav")
+        except Exception:
+            pass
+
+    def _schedule_vosk_model_retry(self):
+        """Try the model install again in 1 minute, on a timer.
+
+        Ashley, 2026-11-27: a failed download used to sit
+        there until she asked again (or opened Command
+        Prompt). Now the app retries by itself every minute
+        while listening is not ready, so she only has to open
+        the app and wait. Only one timer is ever scheduled
+        at a time.
+        """
+        if getattr(self, "_vosk_model_state", None) == "ready":
+            return
+        timer = getattr(self, "_vosk_model_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        try:
+            self._vosk_model_retry_timer = wx.CallLater(
+                60000, self._vosk_model_retry_tick)
+        except Exception:
+            pass
+
+    def _vosk_model_retry_tick(self):
+        """The 1-minute retry timer fired: try again, once."""
+        self._vosk_model_retry_timer = None
+        if getattr(self, "_vosk_model_state", None) == "ready":
+            return
+        if getattr(self, "_vosk_model_running", False):
+            self._schedule_vosk_model_retry()
+            return
+        threading.Thread(target=self._ensure_vosk_model,
+                         daemon=True).start()
+
+    def _ensure_vosk_model(self, force=False):
+        """Download and install the Vosk listening model itself.
+
+        Ashley, 2026-11-27: "Why can't you just update the
+        code to make her listen?" The listening model was the
+        missing piece nobody downloaded: _ensure_requirements
+        only pip-installed libraries, and VoiceControl()
+        raises FileNotFoundError when the model folder is not
+        beside main.py, so voice_available stayed False for
+        the whole run — while the reading voice (Edge TTS)
+        said it was ready, which is a different thing
+        entirely. This gets the model, in the background:
+        - If the model folder is already there, nothing is
+          downloaded at all. VoiceControl() is created now
+          (see _try_create_voice_control), so listening
+          comes alive without a restart.
+        - Otherwise the 40 MB zip is downloaded from
+          alphacephei.com, unzipped beside main.py, and a
+          double-nested folder (model folder inside a model
+          folder, the usual unzip mistake) is flattened, so
+          the model ends up exactly where VoiceControl()
+          looks for it.
+        - Disk space is checked first: under 200 MB free
+          fails plainly instead of filling the disk.
+        - No internet, a bad download, or a bad zip fails
+          with a plain reason (see _plain_install_reason),
+          Samantha says so once in her own voice (see
+          _on_vosk_model_failed), and the app retries by
+          itself in 1 minute.
+        - One install at a time: if a pip install (edge /
+          requirements) is running, this waits and retries
+          later instead of starting a second install.
+        - Samantha says "I'm on it" while it downloads, and
+          when it is ready she says she can hear now (see
+          _on_vosk_model_ready) and starts listening after
+          the greeting, as normal. No NVDA, no Microsoft
+          voice, no Command Prompt, no new voice files.
+        force=True (an explicit "install the listening
+        model") skips the 60-second gap between tries.
+        """
+        lock = getattr(self, "_vosk_model_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._vosk_model_lock = lock
+        attempted = False
+        with lock:
+            if getattr(self, "_vosk_model_running", False):
+                return
+            self._vosk_model_running = True
+            attempted = True
+        try:
+            if (getattr(self, "_edge_install_running", False)
+                    or getattr(self, "_requirements_running", False)):
+                # A pip install is running: wait for it, then
+                # retry by ourselves in a minute, instead of
+                # starting a second install at the same time.
+                self._schedule_vosk_model_retry()
+                return
+            self._vosk_model_state = "checking"
+            if self._vosk_model_present():
+                was_available = getattr(self, "voice_available", False)
+                if self._try_create_voice_control():
+                    # Only announce (and start listening) when
+                    # listening was NOT available before this
+                    # check: at startup, when VoiceControl()
+                    # already worked in __init__, the greeting
+                    # flow owns listening and nothing extra is
+                    # said. But if the model appeared after
+                    # startup (dropped in by hand, or a retry
+                    # after a failure), announce it now.
+                    self._vosk_model_state = "ready"
+                    self._vosk_model_last_reason = None
+                    self._write_vosk_flag(True)
+                    if not was_available:
+                        wx.CallAfter(self._on_vosk_model_ready)
+                    return
+                # Model folder is there but listening still
+                # cannot start (vosk library missing, or the
+                # model cannot be loaded): count it as a
+                # failed try, so it is retried, and say why.
+                self._vosk_model_state = "failed"
+                self._vosk_model_fail_count = \
+                    getattr(self, "_vosk_model_fail_count", 0) + 1
+                if VoiceControl is None:
+                    self._vosk_model_last_reason = (
+                        "the voice listening library is not ready yet")
+                else:
+                    self._vosk_model_last_reason = (
+                        "the listening model could not be loaded")
+                self._write_vosk_flag(False)
+                try:
+                    self.logger.log_error(
+                        "VOSK MODEL install failed: "
+                        + str(self._vosk_model_last_reason))
+                except Exception:
+                    pass
+                wx.CallAfter(self._on_vosk_model_failed)
+                return
+            if not self._vosk_model_should_retry(force=force):
+                return
+            self._vosk_model_state = "installing"
+            self._vosk_model_started_announced = False
+            self._vosk_model_last_try = time.time()
+            self._listening_not_ready_announced = False
+            wx.CallAfter(self._announce_vosk_model_started)
+            # Disk space first: the zip plus the extracted
+            # model need room, and a full disk was already
+            # one of her failures (2026-11-21).
+            try:
+                import shutil as _shutil
+                free = _shutil.disk_usage(
+                    str(Path(__file__).parent)).free
+            except Exception:
+                free = _VOSK_MODEL_MIN_FREE_BYTES
+            if free < _VOSK_MODEL_MIN_FREE_BYTES:
+                raise OSError("No space left on device")
+            # Download the zip, in chunks, to a temp file.
+            import urllib.request
+            import urllib.error
+            tmp_dir = Path(tempfile.gettempdir())
+            zip_path = tmp_dir / (
+                "vosk-model-small-en-us-0.15-"
+                + str(int(time.time())) + ".zip")
+            extract_dir = tmp_dir / (
+                "vosk-model-extract-"
+                + str(int(time.time())))
+            try:
+                with urllib.request.urlopen(
+                        _VOSK_MODEL_URL, timeout=120) as resp, \
+                        open(zip_path, "wb") as out:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                if not zip_path.exists() or zip_path.stat().st_size < 1_000_000:
+                    raise ValueError("download did not finish")
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(str(zip_path)) as zf:
+                    zf.extractall(str(extract_dir))
+                # Find the model folder inside the zip: it is
+                # usually at the top level, but a double-nested
+                # folder (model inside a model folder, the
+                # usual unzip mistake) is flattened here, so
+                # it ends up exactly where VoiceControl()
+                # looks for it. Prefer a folder that actually
+                # holds model files (am/ or conf/) — the outer
+                # folder of a double-nested zip only holds the
+                # inner folder, so picking the first match
+                # would leave the model one level too deep
+                # and VoiceControl() would still fail on it.
+                cands = [c for c in extract_dir.rglob(_VOSK_MODEL_NAME)
+                         if c.is_dir()]
+                cands.sort(key=lambda c: len(c.parts), reverse=True)
+                found = None
+                for cand in cands:
+                    if (cand / "am").is_dir() or (cand / "conf").is_dir():
+                        found = cand
+                        break
+                if found is None and cands:
+                    found = cands[0]
+                if found is None:
+                    raise ValueError(
+                        "downloaded file did not contain the listening model")
+                target = self._vosk_model_dir()
+                if target.exists():
+                    shutil.rmtree(str(target), ignore_errors=True)
+                shutil.move(str(found), str(target))
+                if not self._vosk_model_present():
+                    raise ValueError(
+                        "listening model could not be put in place")
+            finally:
+                try:
+                    zip_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    shutil.rmtree(str(extract_dir), ignore_errors=True)
+                except Exception:
+                    pass
+            self._vosk_model_state = "ready"
+            self._vosk_model_last_reason = None
+            self._write_vosk_flag(True)
+            if self._try_create_voice_control():
+                wx.CallAfter(self._on_vosk_model_ready)
+            else:
+                # The model is on disk now, but listening
+                # still cannot start: retry, and say why.
+                self._vosk_model_state = "failed"
+                self._vosk_model_fail_count = \
+                    getattr(self, "_vosk_model_fail_count", 0) + 1
+                self._vosk_model_last_reason = (
+                    "the listening model could not be loaded")
+                try:
+                    self.logger.log_error(
+                        "VOSK MODEL install failed: "
+                        "model downloaded but voice control "
+                        "could not be created")
+                except Exception:
+                    pass
+                wx.CallAfter(self._on_vosk_model_failed)
+        except Exception as e:
+            # A download / unzip failure, or the disk-space
+            # check above: a plain reason, logged, said once,
+            # retried by itself in a minute. A try that
+            # already counted as ready is never re-marked.
+            if getattr(self, "_vosk_model_state", None) != "ready":
+                self._vosk_model_state = "failed"
+                self._vosk_model_fail_count = \
+                    getattr(self, "_vosk_model_fail_count", 0) + 1
+                self._vosk_model_last_reason = \
+                    self._plain_install_reason([str(e)[:200]])
+                try:
+                    self._write_vosk_flag(False)
+                except Exception:
+                    pass
+                try:
+                    self.logger.log_error(
+                        "VOSK MODEL install failed: " + str(e)[:200])
+                except Exception:
+                    pass
+                try:
+                    wx.CallAfter(self._on_vosk_model_failed)
+                except Exception:
+                    pass
+        finally:
+            self._vosk_model_running = False
+
+    def _on_vosk_model_ready(self):
+        """The listening model is ready (main thread).
+
+        Ashley, 2026-11-27: "have her tell me when the
+        install is finished" — for listening, as for the
+        reading voice. Samantha says she can hear now, in
+        her own voice (the reading voice when it is up, or
+        her recorded "Yes?" clip when it is not — the words
+        themselves cannot be spoken without the reading
+        voice), and then starts listening after the greeting,
+        as normal, so Ashley can say a command straight away
+        without pressing anything. Only announced when
+        listening was NOT available before: when the model
+        was already there at startup, the greeting flow owns
+        listening and nothing extra is said. The
+        "cannot hear yet" flag is cleared, so a later
+        failure may be announced again.
+        """
+        timer = getattr(self, "_vosk_model_retry_timer", None)
+        if timer is not None:
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+        self._vosk_model_retry_timer = None
+        self._listening_not_ready_announced = False
+        self._vosk_model_explicit = False
+        if not getattr(self, "voice_available", False):
+            return
+        self._answer_in_samantha_voice(
+            "I can hear you now. Ask me to list your shows.",
+            "samantha_yes.wav")
+        # Start listening now, as after the greeting: the
+        # greeting already passed while listening was not
+        # ready, so without this her next words would still
+        # never be heard. _listen_after_greeting waits while
+        # Samantha is still reading, so it does not hear her
+        # own announcement as a command.
+        self._listen_after_greeting()
+
+    def _on_vosk_model_failed(self):
+        """The model install failed (main thread).
+
+        Samantha says so herself, in her own voice — the
+        "Excuse me" clip when the reading voice is down
+        (the reason itself cannot be spoken without it, so
+        it is on the status line and in the log instead),
+        or the full plain reason in the reading voice when
+        it is up — once for this failure, whether or not she
+        was waiting to listen. She does NOT just go silent:
+        the app also schedules another try by itself in 1
+        minute (see _schedule_vosk_model_retry), so Ashley
+        does not have to ask again or open Command Prompt.
+        Never NVDA, never Microsoft.
+        """
+        self._vosk_model_explicit = False
+        self._schedule_vosk_model_retry()
+        if (getattr(self, "_vosk_model_not_ready_said", 0)
+                == getattr(self, "_vosk_model_fail_count", 0)):
+            return
+        self._vosk_model_not_ready_said = \
+            getattr(self, "_vosk_model_fail_count", 0)
+        reason = getattr(self, "_vosk_model_last_reason", None)
+        msg = "I still cannot hear you."
+        if reason:
+            msg += " " + str(reason) + "."
+        msg += " I will try again by myself in a minute."
+        self._answer_in_samantha_voice(msg, "samantha_excuse_me.wav")
+
+    def _listening_not_ready_reason(self):
+        """Plain words for why Samantha cannot hear yet, or None."""
+        if getattr(self, "voice_available", False):
+            return None
+        state = getattr(self, "_vosk_model_state", "unknown")
+        reason = getattr(self, "_vosk_model_last_reason", None)
+        if state in ("installing", "checking"):
+            return "I am still getting my listening ready"
+        if state == "failed":
+            if reason:
+                return "I cannot hear you yet. " + str(reason)
+            return "I cannot hear you yet. The listening model did not install"
+        if reason:
+            return "I cannot hear you yet. " + str(reason)
+        return "I cannot hear you yet. The listening model is not ready yet"
+
+    def _say_listening_not_ready(self, force=False):
+        """Say, in Samantha's voice, that she cannot hear yet.
+
+        Ashley, 2026-11-27: when listening is not available,
+        pressing Ctrl+Shift+B / Ctrl+Shift+W, or answering
+        the greeting, used to be met with silence (NVDA
+        speak() while NVDA quiet is on). Now Samantha says
+        so herself: the full plain reason in her reading
+        voice when it is up, or her recorded "Excuse me"
+        clip when it is not (see _answer_in_samantha_voice),
+        with the reason on the status line either way.
+        force=False (the greeting path) says it only once
+        per install attempt; force=True (an explicit press,
+        or "can you hear me") always answers. Kicks the
+        model install off if it is not already running.
+        Returns True when something was said.
+        """
+        if getattr(self, "voice_available", False):
+            return False
+        if not force and getattr(
+                self, "_listening_not_ready_announced", False):
+            return False
+        self._listening_not_ready_announced = True
+        msg = self._listening_not_ready_reason() or (
+            "I cannot hear you yet. The listening model is not ready yet")
+        msg += (" I will try again by myself in a minute."
+                " You can also say, install the listening model.")
+        try:
+            self.status_label.SetLabel(msg)
+        except Exception:
+            pass
+        self._answer_in_samantha_voice(msg, "samantha_excuse_me.wav")
+        if not getattr(self, "_vosk_model_running", False):
+            try:
+                threading.Thread(target=self._ensure_vosk_model,
+                                 daemon=True).start()
+            except Exception:
+                pass
+        return True
+
+    def _say_listening_status(self):
+        """Answer "why can't you hear me" honestly, in her voice."""
+        if getattr(self, "voice_available", False):
+            self._play_sound_effect("samantha_yes_i_can.wav")
+            msg = "Yes, I can hear you."
+            try:
+                self.status_label.SetLabel(msg)
+            except Exception:
+                pass
+            return
+        self._say_listening_not_ready(force=True)
+
+    def _on_install_listening_model(self, event=None):
+        """Menu / voice: get Samantha listening.
+
+        Ashley, 2026-11-27: "install the listening model" /
+        "get Samantha listening" — the one checkable step in
+        the app for listening, like "install my reading voice"
+        is for the reading voice. Samantha says "I'm on it",
+        the download runs in the background, and when it is
+        ready she says she can hear now (see
+        _on_vosk_model_ready); if it fails she says why, and
+        the app retries by itself in 1 minute. An explicit
+        ask always forces a fresh try right now, even if a
+        try just failed a moment ago. If she can already
+        hear, she just says so instead of downloading again.
+        No Command Prompt step is needed for any of this.
+        """
+        if getattr(self, "voice_available", False) \
+                and self._vosk_model_present():
+            self._vosk_model_explicit = False
+            self._answer_in_samantha_voice(
+                "I can hear you now. Ask me to list your shows.",
+                "samantha_yes_i_can.wav")
+            return
+        self._vosk_model_explicit = True
+        self._vosk_model_last_try = 0.0
+        self._listening_not_ready_announced = False
+        try:
+            self.status_label.SetLabel(
+                "Getting Samantha listening ready...")
+        except Exception:
+            pass
+        self._play_sound_effect("samantha_im_on_it.wav")
+        threading.Thread(target=self._ensure_vosk_model, args=(True,),
+                         daemon=True).start()
+
     def _reload_missing_modules(self):
         """Load the libraries that were missing at startup.
 
@@ -6416,6 +7103,16 @@ class PlayerFrame(wx.Frame):
         without restarting the app. Only the ones that were
         missing are tried. If one still cannot be loaded, it
         stays off and the next startup tries again.
+
+        Ashley, 2026-11-27 (listening fix): this only ever
+        retried creating self.voice when VOICE_CONTROL_AVAILABLE
+        was False (the import itself had failed). When the
+        import succeeded but the Vosk model was missing,
+        VOICE_CONTROL_AVAILABLE was True, so it never retried
+        — voice stayed None forever, even after the model
+        appeared. Now it retries creating voice control
+        whenever self.voice is None, whatever the import did
+        (see _try_create_voice_control).
         """
         global VoiceControl, av, AudioPlayer, yt
         global VOICE_CONTROL_AVAILABLE, AV_AVAILABLE
@@ -6425,12 +7122,8 @@ class PlayerFrame(wx.Frame):
                 import voice_control as _vc
                 VoiceControl = _vc.VoiceControl
                 VOICE_CONTROL_AVAILABLE = True
-                if getattr(self, "voice", None) is None:
-                    try:
-                        self.voice = VoiceControl()
-                        self.voice_available = True
-                    except Exception:
-                        pass
+            if getattr(self, "voice", None) is None:
+                self._try_create_voice_control()
         except Exception:
             pass
         try:
@@ -6492,6 +7185,8 @@ class PlayerFrame(wx.Frame):
             if getattr(self, "_requirements_running", False):
                 return
             if getattr(self, "_edge_install_running", False):
+                return
+            if getattr(self, "_vosk_model_running", False):
                 return
             if not self._requirements_should_retry(force=force):
                 return
@@ -6585,6 +7280,17 @@ class PlayerFrame(wx.Frame):
                 pass
         finally:
             self._requirements_running = False
+            # The libraries are dealt with (ready or failed):
+            # now get the listening model itself, in the
+            # background, one install at a time (see
+            # _ensure_vosk_model). This is the chain that
+            # makes listening work without Command Prompt:
+            # reading voice -> libraries -> listening model.
+            try:
+                threading.Thread(target=self._ensure_vosk_model,
+                                 daemon=True).start()
+            except Exception:
+                pass
 
     def _on_requirement_failed(self, import_name, pip_name, reason, required):
         """A library install failed (main thread).
@@ -6668,7 +7374,8 @@ class PlayerFrame(wx.Frame):
         """
         missing = [entry for entry in _REQUIRED_LIBRARIES
                    if not self._library_available(entry[0])]
-        if not missing:
+        if not missing and getattr(self, "voice_available", False) \
+                and self._vosk_model_present():
             self._say_in_samantha_voice(
                 "Everything is ready now. Ask me to list your shows.")
             return

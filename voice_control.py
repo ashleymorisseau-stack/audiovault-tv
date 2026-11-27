@@ -89,6 +89,10 @@ class VoiceControl:
         self.model_path = Path(model_path)
         self.model = None
         self.recognizer = None
+        # Plain reason the microphone stream last failed with,
+        # if it did (see listen): main.py reads this and says
+        # it as a voice error, instead of silence.
+        self.last_error = None
         self.is_listening = False
         self.wake_word_active = False
         self.audio_queue = queue.Queue()
@@ -190,6 +194,12 @@ class VoiceControl:
                 return heard if heard else None
 
         except Exception as e:
+            # The microphone stream itself failed (no mic,
+            # mic in use, sounddevice error): record the
+            # plain reason so main.py can say it in
+            # Samantha's voice, instead of returning None
+            # silently and being treated as "she said nothing".
+            self.last_error = str(e)[:200]
             print(f"Voice recognition error: {e}")
             return None
         finally:
@@ -360,6 +370,45 @@ class VoiceControl:
                 r"|\bare you listening\b|\bcan you hear us\b",
                 text):
             return 'can_you_hear_me'
+
+        # --- "Why can't you hear me?": Ashley, 2026-11-27.
+        # "can you hear me" is checked above and answers
+        # "Yes, I can" — but only honestly, in main.py, when
+        # listening is really available. This is the
+        # diagnostic version: Samantha tells her whether she
+        # can hear, and if not, why (model installing /
+        # missing / failed). Checked before the install
+        # check below, or "hear me" in the question would be
+        # read as "install the listening model".
+        if re.search(
+                r"\bwhy\b.*\b(?:can'?t|cannot|can not|don'?t)\b.*"
+                r"\bhear\b"
+                r"|\bwhy\b.*\bhear\b.*\bme\b",
+                text):
+            return 'listening_status'
+
+        # --- Install the listening model: Ashley, 2026-11-27.
+        # "install the listening model" / "get Samantha
+        # listening" / "make Samantha listen" — the one
+        # checkable step in the app for listening, like
+        # "install my reading voice" is for the reading
+        # voice. Checked before search/play so it is not
+        # treated as a show search, and after "can you hear
+        # me" / "why can't you hear me" above so those
+        # questions are not read as install requests.
+        if re.search(
+                r"\b(?:install|get|set up|setup|fix)\b.*"
+                r"\b(?:listening|listen|hearing)\b"
+                r"|\bget samantha listening\b"
+                r"|\bmake samantha (?:listen|hear)\b"
+                r"|\bsamantha (?:listen|hear me)\b"
+                r"|\binstall (?:the )?listening model\b"
+                r"|\bstart listening\b"
+                # "Samantha, listen" arrives here with the wake
+                # word already stripped, as just "listen".
+                r"|^\s*listen\s*(?:to me)?\s*$",
+                text):
+            return 'install_listening_model'
 
         # --- Reading-voice diagnostic: Ashley, 2026-11-27.
         # "why is my reading voice not ready" / "what happened

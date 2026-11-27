@@ -89,9 +89,21 @@ Ctrl+Shift+G is not the NVDA toggle — it was already the TV guide key ("What's
 
 When Samantha starts downloading a show for you, from AudioVault.net or from YouTube, she says in her own recorded voice "I'm downloading that show for you" (sounds/samantha_downloading.wav), so you hear it even with NVDA quiet on.
 
-## "Can You Hear Me?" — "Yes, I Can Hear You"
+## "Can You Hear Me?" — Only "Yes" When She Really Can
 
-When you ask Samantha "can you hear me", "do you hear me", or "are you listening", she answers in her own recorded voice "Yes, I can hear you" (sounds/samantha_yes_i_can.wav).
+When you ask Samantha "can you hear me", "do you hear me", or "are you listening", she answers in her own recorded voice "Yes, I can hear you" (sounds/samantha_yes_i_can.wav) — but only when listening is really working. That answer used to be a lie: the reading voice being ready does not mean she can hear you at all. Listening and speaking are separate things (see "Samantha Can Hear You" below). If she cannot hear yet, she says so instead, in her own voice, and tells you why — "I cannot hear you yet. I am still getting my listening ready", or "the listening model did not install" — and she tries again by herself in a minute. You can also ask "why can't you hear me" (or "why can you not hear me"), and she tells you the plain reason for the last try, in her own voice when the reading voice is up, or with her recorded "Excuse me" clip when it is not, with the reason on the status line either way.
+
+## Samantha Can Hear You — the Listening Model
+
+Listening (Vosk) and speaking (Edge TTS, the reading voice) are separate. "My reading voice is ready" means she can read the list out loud; it does not mean she can hear you. Hearing needs a second thing, a listening model — a folder called vosk-model-small-en-us-0.15 beside main.py. That folder was the missing piece: the app used to pip-install the listening library, but it never downloaded the model itself, so VoiceControl() failed at startup and listening stayed off for the whole run, while the reading voice said it was ready. And when you pressed Ctrl+Shift+B or Ctrl+Shift+W, the answer went through NVDA, which is quiet in the app, so you heard nothing at all — not even that listening was off.
+
+Now the app downloads and installs the listening model itself, in the background, when it opens — about 40 MB from alphacephei.com, unzipped beside main.py, with a double-nested folder flattened so the model ends up exactly where it is looked for. It checks disk space first (under 200 MB free fails plainly instead of filling the disk), says "I'm on it" while it downloads, and retries by itself every 1 minute if a try fails, with the plain reason in the app log ("VOSK MODEL install failed: ..."). One install at a time, never two at once. When the model is ready, Samantha says "I can hear you now. Ask me to list your shows." in her own voice, and then starts listening after the greeting, as normal, so you can say a command straight away without pressing anything. If the model was already there when the app opened, nothing is downloaded and nothing extra is said — the greeting flow owns listening then.
+
+You can also ask for it directly, any time: say or type "install the listening model" (or "get Samantha listening", or "make Samantha listen"), or use Controls, then "Install the Listening Model". That always forces a fresh try right now, even if a try just failed a moment ago. Samantha says "I'm on it", the download runs in the background, and when it is ready she says she can hear now. If she can already hear, she just says so instead of downloading again.
+
+Pressing Ctrl+Shift+B or Ctrl+Shift+W when listening is not available is no longer silent: Samantha answers in her own voice — the full plain reason in her reading voice when it is up, or her recorded "Excuse me" clip when it is not — and the model install is kicked off if it is not already running. The same goes for answering the greeting: if she cannot listen yet, she says so once, instead of just never listening. If the microphone itself fails (no mic, mic in use), she says that as a voice error in her own voice, with the plain reason, instead of "Excuse me" as if you had simply not spoken.
+
+There is no Command Prompt step for any of this any more. No NVDA or Microsoft voice is ever used for these announcements — Samantha's own voice only. The wake words (Samantha, Sam, Sammy, Guide, Metro), her full name (Samantha Hernandez Right), Ctrl+Shift+Q (NVDA quiet), Ctrl+Shift+G (TV guide), the reading voice, the text box, and the chimes (once each) are all unchanged.
 
 ## "I'm Good" — Fixed So You Actually Hear the List
 
@@ -147,6 +159,8 @@ When the app opens, it checks for each library it needs and installs any that ar
 wxPython is the one exception, and it has to be: the app cannot open at all without it, so there is no app yet to install it from — it has to come with the installer.
 
 How it works: the reading voice is installed first, then the rest, one pip install at a time — never two at once, so they cannot fight each other. Samantha says "I'm on it" in her own recorded voice while installs are running, so you hear it happening. When everything is ready she says so in the reading voice itself: "Everything is ready now. Ask me to list your shows." If something fails, she says the plain reason once — "there is no internet connection right now", "the disk is full", "Windows would not let the app write the files" — instead of going silent or repeating "not ready" forever, and the app tries again by itself every 1 minute. The full pip error still goes to the app log, so it can be found if it keeps failing.
+
+After the libraries, the app gets the listening model itself (see "Samantha Can Hear You" above) — that is the last step in the same chain, so listening comes alive without restarting the app and without Command Prompt.
 
 Three ways the old install failed silently, now fixed: first, the app used to run pip with its own program file as if it were Python — when the app runs as a built .exe, that file is not Python and has no pip, so the install failed at once with no message. Now it uses a real Python (its own, or the `py` launcher, or `python`), and if a Python has no pip at all it puts pip there first with ensurepip and tries again. Second, an unexpected error inside the install used to kill the background thread and leave the app stuck saying "I'm on it" forever, with no retry — now that counts as a failed try, with the reason logged and a retry in 1 minute. Third, a library that was missing when the app opened used to stop the whole app from starting, because its import ran at the top of the file before the installer could run at all — now those imports are guarded, the app opens, the install gets the library, and the app loads it afterwards, so the feature comes alive without restarting.
 
@@ -305,6 +319,16 @@ You can also do this from the menu: Channels, then "Delete Channel and Downloads
 | "install everything I need" | Get every library the app needs, one at a time, in the background |
 | "why is my reading voice not ready" | Samantha tells you the plain reason the last try failed, and what state the voice is in |
 | "what happened to my reading voice" | Same as above |
+
+### Listening — Install and Diagnose
+| Say This | Action |
+|----------|--------|
+| "install the listening model" | Get Samantha listening now ("I'm on it", then "I can hear you now" when the model is ready) |
+| "get Samantha listening" | Same as above |
+| "make Samantha listen" | Same as above |
+| "can you hear me" | Samantha answers "Yes, I can hear you" — only when listening is really working; otherwise she says she cannot hear yet, and why |
+| "why can't you hear me" | Samantha tells you whether she can hear, and if not, why (model installing / missing / failed) |
+| "why can you not hear me" | Same as above |
 
 ### Search and Download on AudioVault.net
 | Say This | Action |
