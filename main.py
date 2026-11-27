@@ -15,12 +15,43 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from audio_player import AudioPlayer
+try:
+    from audio_player import AudioPlayer
+    AUDIO_PLAYER_AVAILABLE = True
+except ImportError:
+    # pygame (which audio_player needs) is not installed yet:
+    # the app still opens, and the requirements install below
+    # gets pygame and then loads AudioPlayer (see
+    # _reload_missing_modules), instead of the whole app
+    # refusing to start over one missing library.
+    AudioPlayer = None
+    AUDIO_PLAYER_AVAILABLE = False
 from playlist_manager import PlaylistManager
 from channel_manager import ChannelManager
-from voice_control import VoiceControl
+try:
+    from voice_control import VoiceControl
+    VOICE_CONTROL_AVAILABLE = True
+except ImportError:
+    # vosk / sounddevice (which voice_control needs) are not
+    # installed yet: voice control stays off until the
+    # requirements install gets them (see
+    # _reload_missing_modules), instead of the whole app
+    # refusing to start. Typing still works: _run_typed_command
+    # builds a bare parser when there is no voice control.
+    VoiceControl = None
+    VOICE_CONTROL_AVAILABLE = False
 from player_logger import PlayerLogger
-import audiovault_client as av
+try:
+    import audiovault_client as av
+    AV_AVAILABLE = True
+except ImportError:
+    # requests / beautifulsoup4 (which audiovault_client
+    # needs) are not installed yet: AudioVault search and
+    # download stay off until the requirements install gets
+    # them (see _reload_missing_modules), instead of the
+    # whole app refusing to start.
+    av = None
+    AV_AVAILABLE = False
 try:
     import youtube_client as yt
     YT_AVAILABLE = True
@@ -218,6 +249,33 @@ _WORK_COMMANDS = (
     'delete_channel_downloads',
 )
 
+# Libraries Audio Vault TV needs, that the app gets and
+# installs itself on startup — Ashley, 2026-11-27: "I want
+# it to get Edge and then install it", and then: whatever
+# requirements she needs for Command Prompt, the app should
+# just get them and install them itself, so she never has to
+# do it in Command Prompt. Each entry is (module name to
+# check for, pip package name, plain spoken name, required).
+# "required" ones must all be ready before Samantha says
+# everything is ready. cloudscraper is optional: the show
+# client already falls back to plain requests without it, so
+# a failed cloudscraper install never blocks the rest.
+# wxPython is deliberately NOT here: the app cannot open at
+# all without it, so there is no app yet to install it from —
+# it has to come with the installer. Everything else is
+# checked on startup and installed in the background, one at
+# a time (see _ensure_requirements).
+_REQUIRED_LIBRARIES = (
+    ("edge_tts", "edge-tts", "the reading voice", True),
+    ("vosk", "vosk", "voice listening", True),
+    ("sounddevice", "sounddevice", "the microphone", True),
+    ("pygame", "pygame", "sound playing", True),
+    ("requests", "requests", "getting shows", True),
+    ("bs4", "beautifulsoup4", "reading show pages", True),
+    ("yt_dlp", "yt-dlp", "YouTube downloads", True),
+    ("cloudscraper", "cloudscraper", "getting shows", False),
+)
+
 
 class PlayerFrame(wx.Frame):
     def __init__(self):
@@ -228,15 +286,24 @@ class PlayerFrame(wx.Frame):
         # Initialize logger
         self.logger = PlayerLogger(Path.home() / "mp3_player_log.txt")
         
-        self.player = AudioPlayer()
+        # AudioPlayer is None when pygame is not installed yet
+        # (see the guarded import at the top): playback stays
+        # off until the requirements install gets it, instead
+        # of the app refusing to start.
+        try:
+            self.player = AudioPlayer() if AudioPlayer is not None else None
+        except Exception:
+            self.player = None
         self.playlist = PlaylistManager()
         self.channels = ChannelManager(Path.home() / ".mp3_player_channels.json", logger=self.logger)
-        
+
         t1 = time.time()
         self.logger.log_playback("STARTUP", f"Basic init: {t1-t0:.2f}s")
-        
+
         # Initialize voice control
         try:
+            if VoiceControl is None:
+                raise ImportError("voice_control is not available")
             self.voice = VoiceControl()
             self.voice_available = True
         except Exception as e:
@@ -284,10 +351,40 @@ class PlayerFrame(wx.Frame):
         self._pending_reading_text = None
         self._edge_install_retry_timer = None
         self._edge_install_started_announced = False
+        # Requirements install state — ALL of it is defined
+        # BEFORE the install thread below is started, for the
+        # same reason as the edge state above: the thread must
+        # never run before the flags it needs exist. One
+        # library at a time, in the background (see
+        # _ensure_requirements): "ready" / "missing" /
+        # "installing" / "failed" per library, how many times
+        # each one has failed, and the plain reason for the
+        # latest failure, so Samantha can say it once instead
+        # of going silent or repeating "not ready" forever.
+        self._requirements_state = {}
+        self._requirements_running = False
+        self._requirements_lock = threading.Lock()
+        self._requirements_last_try = 0.0
+        self._requirements_fail_count = {}
+        self._requirements_last_reason = {}
+        self._requirements_announced_started = False
+        self._requirements_ready_announced = False
+        # (library, fail count) pairs Samantha has already
+        # announced a failure for, so the same failure is
+        # never said twice.
+        self._requirements_failed_said = set()
+        # A failed Edge TTS synthesis (the library is there
+        # but the internet failed) says "not ready" once, not
+        # on every ask, until a reading works again.
+        self._edge_tts_read_failed_said = False
         # Get Samantha's reading voice ready in the background
         # (installs edge-tts itself if it is missing, and
         # retries on its own if a try fails — Ashley never
-        # has to use Command Prompt for it).
+        # has to use Command Prompt for it). When the reading
+        # voice is dealt with, the same thread goes on to get
+        # every other library the app needs (see
+        # _ensure_requirements) — still in the background,
+        # still one at a time, still no Command Prompt.
         threading.Thread(target=self._ensure_edge_tts,
                          daemon=True).start()
         # Ashley, 2026-11-26: the wake chimes were playing twice.
@@ -464,6 +561,8 @@ class PlayerFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_set_name, set_name_item)
         install_voice_item = controls_menu.Append(wx.ID_ANY, "Install My Reading Voice", "Get Samantha's reading voice ready, so she can read the show list")
         self.Bind(wx.EVT_MENU, self._on_install_reading_voice, install_voice_item)
+        install_all_item = controls_menu.Append(wx.ID_ANY, "Install Everything I Need", "Get everything Audio Vault TV needs — reading voice, voice listening, sound playing, getting shows — so nothing needs Command Prompt")
+        self.Bind(wx.EVT_MENU, self._on_install_requirements, install_all_item)
         controls_menu.AppendSeparator()
         cloud_toggle_item = controls_menu.Append(wx.ID_ANY, "Auto Free Up Space (OneDrive)",
                                                  "Automatically make downloads online-only to save disk space")
@@ -1769,6 +1868,15 @@ class PlayerFrame(wx.Frame):
             # the background, and she says when it is ready
             # (see _on_install_reading_voice).
             self._on_install_reading_voice()
+            return
+        elif command == 'install_requirements':
+            # Ashley, 2026-11-27: "install everything I need"
+            # — get every library the app needs, not just the
+            # reading voice, so nothing needs Command Prompt.
+            # Samantha says "I'm on it", the installs run in
+            # the background one at a time, and she says when
+            # it is all ready (see _on_install_requirements).
+            self._on_install_requirements()
             return
         elif command == 'list_channels':
             # "Samantha, list all the channels I have" — read
@@ -5462,6 +5570,9 @@ class PlayerFrame(wx.Frame):
                     time.sleep(3)
             if last_error is not None:
                 raise last_error
+            # A reading worked: a later failure is a new one,
+            # so it may be announced once again then.
+            self._edge_tts_read_failed_said = False
             # One voice at a time: wait for any Samantha
             # recording that is still playing ("I'm on it",
             # the guide intro, the greeting) to finish, so
@@ -5479,24 +5590,81 @@ class PlayerFrame(wx.Frame):
                 time.sleep(0.2)
             words = len(str(text).split())
             wx.CallAfter(self._play_dynamic_wav, path, words)
-        except Exception:
-            # Edge TTS failed (no internet, library problem):
+        except Exception as e:
+            # Edge TTS failed (no internet, library problem).
+            # The reason is written to the app log, in plain
+            # words, so it can be found instead of vanishing.
+            try:
+                self.logger.log_error(
+                    "EDGE-TTS read failed: " + str(e)[:200])
+            except Exception:
+                pass
             # Samantha says her reading voice isn't ready, in
-            # her own voice. Never NVDA for the list, never
-            # Microsoft. Queued behind any clip still playing,
-            # so it never talks over her, and _samantha_reading
-            # stays up until the clip finishes.
-            wx.CallAfter(self._play_samantha_sequence,
-                         ["samantha_reading_not_ready.wav"],
-                         after=self._clear_samantha_reading)
+            # her own voice — but only once for this failure.
+            # The old code said it on EVERY ask while the
+            # internet was down, so she heard "not ready"
+            # over and over forever. Now the clip is queued
+            # only the first time; later asks stay quiet until
+            # a reading works again (which clears the flag
+            # above) or the app retries by itself. Never NVDA
+            # for the list, never Microsoft. Queued behind any
+            # clip still playing, so it never talks over her,
+            # and _samantha_reading stays up until the clip
+            # finishes.
+            if not getattr(self, "_edge_tts_read_failed_said", False):
+                self._edge_tts_read_failed_said = True
+                wx.CallAfter(self._play_samantha_sequence,
+                             ["samantha_reading_not_ready.wav"],
+                             after=self._clear_samantha_reading)
+            else:
+                wx.CallAfter(self._clear_samantha_reading)
 
-    def _run_pip_install_edge_tts(self, extra_args):
-        """One pip try for edge-tts; returns (ok, error_tail).
+    def _pip_command_candidates(self):
+        """Pythons that can run `python -m pip install`, in order.
 
-        Uses this app's own Python (sys.executable), so it
-        installs into the same Python the app is running in
-        — a `python -m pip install` typed in Command Prompt
-        can land in a different Python. --disable-pip-version-check
+        Ashley, 2026-11-27: the install kept failing silently
+        on her PC, and one way that happens is sys.executable
+        not being a Python at all. When the app runs as a
+        frozen program (a .exe built from the code), its
+        sys.executable IS that .exe — `AudioVaultTV.exe -m pip
+        install` fails, because the .exe is not Python and has
+        no pip. So a frozen exe is never used here. First
+        choice is still this app's own Python (sys.executable,
+        when it really is a python), so the install lands in
+        the same Python the app is running in — a `python -m
+        pip install` typed in Command Prompt can land in a
+        different Python. After that, the plain `py` launcher
+        and `python` on the path, in that order.
+        """
+        candidates = []
+        exe = sys.executable or ""
+        frozen = bool(getattr(sys, "frozen", False))
+        base = os.path.basename(exe).lower()
+        if (exe and not frozen
+                and (base.startswith("python") or base in ("py.exe", "py"))):
+            candidates.append([exe])
+        if os.name == "nt":
+            candidates += [["py"], ["python"]]
+        else:
+            candidates += [["python3"], ["python"]]
+        seen = set()
+        out = []
+        for cand in candidates:
+            key = tuple(cand)
+            if key not in seen:
+                seen.add(key)
+                out.append(cand)
+        return out
+
+    def _run_pip_install(self, packages, extra_args):
+        """One pip try for the named packages; returns (ok, error_tail).
+
+        Tries each Python from _pip_command_candidates in turn
+        until one of them runs pip. If a Python has no pip at
+        all ("No module named pip"), ensurepip is run once for
+        that Python and the install is tried again with it,
+        before moving on — pip itself missing must not end the
+        whole install silently. --disable-pip-version-check
         keeps pip from spending time (and failing) on checking
         for a newer pip first. No window is shown on Windows.
         Each try gets 300 seconds.
@@ -5506,21 +5674,147 @@ class PlayerFrame(wx.Frame):
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         else:
             startupinfo = None
-        cmd = [sys.executable, "-m", "pip", "install",
-               "--disable-pip-version-check"] + list(extra_args) \
-            + ["edge-tts"]
+        last_tail = ["pip could not be run"]
+        for cand in self._pip_command_candidates():
+            cmd = cand + ["-m", "pip", "install",
+                          "--disable-pip-version-check"] \
+                + list(extra_args) + list(packages)
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                    startupinfo=startupinfo)
+            except subprocess.TimeoutExpired:
+                return False, [
+                    "pip install " + " ".join(packages)
+                    + " timed out after 5 minutes"]
+            except (OSError, ValueError):
+                continue
+            except Exception as e:
+                last_tail = [f"could not run pip: {e}"]
+                continue
+            out = (result.stderr or result.stdout or "").strip()
+            tail = out.splitlines()[-5:] if out else []
+            if result.returncode == 0:
+                return True, []
+            last_tail = tail or ["pip failed with no message"]
+            if "No module named pip" in out:
+                # pip itself is missing for this Python: put
+                # it there with ensurepip, then try the install
+                # once more with the same Python.
+                try:
+                    subprocess.run(
+                        cand + ["-m", "ensurepip", "--default-pip"],
+                        capture_output=True, text=True, timeout=120,
+                        startupinfo=startupinfo)
+                    result2 = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=300,
+                        startupinfo=startupinfo)
+                except Exception:
+                    continue
+                out2 = (result2.stderr or result2.stdout or "").strip()
+                if result2.returncode == 0:
+                    return True, []
+                last_tail = (out2.splitlines()[-5:]
+                             if out2 else last_tail)
+        return False, last_tail
+
+    def _run_pip_install_edge_tts(self, extra_args):
+        """One pip try for edge-tts; returns (ok, error_tail).
+
+        Kept as a thin wrapper over _run_pip_install so the
+        reading-voice install keeps working exactly as before.
+        """
+        return self._run_pip_install(["edge-tts"], extra_args)
+
+    def _plain_install_reason(self, tail):
+        """One short plain reason for a failed install.
+
+        Ashley, 2026-11-27: when an install fails she should
+        hear a plain reason once, not silence and not "not
+        ready" forever. pip's own error lines are jargon, so
+        they are turned into plain words here (the full lines
+        still go to the app log). Only the reason is returned.
+        """
+        text = " ".join(tail or []).strip()
+        low = text.lower()
+        if not text:
+            return "the install did not finish and gave no reason"
+        if "no module named pip" in low or "no module named ensurepip" in low:
+            return "the install tool itself is missing, so nothing could be installed"
+        if ("no space left" in low or "disk full" in low
+                or "not enough space" in low or "no space on device" in low):
+            return "the disk is full, so there is nowhere to put it"
+        if ("connection" in low or "failed to establish" in low
+                or "name or service not known" in low
+                or "temporary failure in name resolution" in low
+                or "network is unreachable" in low
+                or "connection refused" in low
+                or "check your internet" in low):
+            return "there is no internet connection right now"
+        if "timed out" in low or "timeout" in low:
+            return "the install took too long and gave up"
+        if ("permission denied" in low or "access is denied" in low
+                or "consider using the --user option" in low
+                or "externally-managed-environment" in low
+                or "operation not permitted" in low):
+            return "Windows would not let the app write the files"
+        if "could not find a version" in low:
+            return "the package could not be found"
+        if "no matching distribution" in low:
+            return "the package could not be found for this computer"
+        line = [ln.strip() for ln in (tail or []) if ln.strip()]
+        if line:
+            return line[-1][:120]
+        return "the install did not finish"
+
+    def _library_available(self, import_name):
+        """True when the named library can be found right now.
+
+        Uses find_spec, which only looks for the library on
+        disk instead of importing it — importing some of these
+        in a background thread would be slow, and a failed
+        import can stick in sys.modules and hide a library
+        pip has just put there.
+        """
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300,
-                startupinfo=startupinfo)
-            ok = result.returncode == 0
-            tail = ((result.stderr or result.stdout or "")
-                    .strip().splitlines()[-5:])
-            return ok, tail
-        except subprocess.TimeoutExpired:
-            return False, ["pip install edge-tts timed out after 5 minutes"]
-        except Exception as e:
-            return False, [f"could not run pip: {e}"]
+            import importlib.util
+            return importlib.util.find_spec(import_name) is not None
+        except Exception:
+            return False
+
+    def _install_one_library(self, import_name, pip_name):
+        """Install one library if it is missing; returns (ok, reason).
+
+        Nothing is installed when the library is already there.
+        Otherwise pip is tried once normally, then once
+        per-user with --user (which works when the normal one
+        is blocked by permissions), and the library is only
+        counted as installed after it can really be found on
+        disk in this same process. The plain reason for a
+        failure is returned, so Samantha can say it once.
+        """
+        if self._library_available(import_name):
+            return True, None
+        try:
+            import importlib
+            importlib.invalidate_caches()
+        except Exception:
+            pass
+        ok, tail = self._run_pip_install([pip_name], [])
+        if not ok:
+            ok, tail2 = self._run_pip_install([pip_name], ["--user"])
+            tail = tail + tail2
+        if ok:
+            try:
+                import importlib
+                importlib.invalidate_caches()
+            except Exception:
+                pass
+            if self._library_available(import_name):
+                return True, None
+            ok = False
+            tail = tail + ["installed, but the library still cannot be found"]
+        return False, self._plain_install_reason(tail)
 
     def _announce_edge_install_started(self):
         """Samantha says she is installing her reading voice.
@@ -5620,10 +5914,12 @@ class PlayerFrame(wx.Frame):
         if lock is None:
             lock = threading.Lock()
             self._edge_install_lock = lock
+        attempted = False
         with lock:
             if getattr(self, "_edge_install_running", False):
                 return
             self._edge_install_running = True
+            attempted = True
         try:
             self._edge_install_state = "checking"
             if self._edge_import_ok():
@@ -5663,8 +5959,47 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 pass
             wx.CallAfter(self._on_edge_install_failed)
+        except Exception as e:
+            # Something unexpected went wrong inside the
+            # install itself (not pip failing — for example a
+            # wx call before the main loop was ready). The old
+            # code had no handler here at all: the background
+            # thread just died, the state stayed stuck on
+            # "installing" forever, Samantha kept saying "I'm
+            # on it" and never said "not ready", and nothing
+            # ever retried. Now it counts as a failed try
+            # instead: the reason is logged, Samantha says
+            # "not ready" once, and the app retries by itself
+            # in 1 minute. A try that already counted as ready
+            # is never re-marked as failed by this.
+            if getattr(self, "_edge_install_state", None) != "ready":
+                self._edge_install_state = "failed"
+                self._edge_install_fail_count = \
+                    getattr(self, "_edge_install_fail_count", 0) + 1
+                try:
+                    self._write_edge_flag(False)
+                except Exception:
+                    pass
+                try:
+                    self.logger.log_error(
+                        "EDGE-TTS install error: " + str(e)[:200])
+                except Exception:
+                    pass
+                try:
+                    wx.CallAfter(self._on_edge_install_failed)
+                except Exception:
+                    pass
         finally:
             self._edge_install_running = False
+            if attempted:
+                # The reading voice is dealt with (ready or
+                # failed): go on to every other library the
+                # app needs, in the background, one at a time
+                # (see _ensure_requirements). This is also how
+                # the 1-minute retry covers all of them, not
+                # just the reading voice.
+                threading.Thread(target=self._ensure_requirements,
+                                 daemon=True).start()
 
     def _on_edge_install_ready(self):
         """The reading voice is ready (main thread).
@@ -5764,6 +6099,321 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel("Getting Samantha's reading voice ready...")
         self._play_sound_effect("samantha_im_on_it.wav")
         threading.Thread(target=self._ensure_edge_tts, args=(True,),
+                         daemon=True).start()
+
+    def _requirements_should_retry(self, force=False):
+        """True when a new requirements pass may start.
+
+        Never while a pass is already running, and not within
+        a minute of the last pass, so asking twice in a row
+        does not start two install loops. force=True (an
+        explicit "install everything I need") skips the gap
+        but still never starts a second pass while one runs.
+        """
+        if getattr(self, "_requirements_running", False):
+            return False
+        if getattr(self, "_edge_install_running", False):
+            return False
+        if force:
+            return True
+        try:
+            last = float(getattr(self, "_requirements_last_try", 0) or 0)
+        except Exception:
+            last = 0
+        return (time.time() - last) > 60
+
+    def _announce_requirements_started(self):
+        """Samantha says she is getting things ready.
+
+        Queued behind anything already playing (the startup
+        greeting), in her own recorded voice — "I'm on it" —
+        so Ashley hears the installs are actually happening
+        instead of wondering in silence. Said once per pass.
+        """
+        if getattr(self, "_requirements_announced_started", False):
+            return
+        self._requirements_announced_started = True
+        try:
+            self._queue_samantha_sound("samantha_im_on_it.wav")
+        except Exception:
+            pass
+
+    def _reload_missing_modules(self):
+        """Load the libraries that were missing at startup.
+
+        Ashley, 2026-11-27: a library that was not there when
+        the app opened used to keep the whole app from
+        starting, because its import ran at the top of the
+        file. Now those imports are guarded, the app opens,
+        the requirements install gets the library, and this
+        loads it afterwards — so the feature comes alive
+        without restarting the app. Only the ones that were
+        missing are tried. If one still cannot be loaded, it
+        stays off and the next startup tries again.
+        """
+        global VoiceControl, av, AudioPlayer, yt
+        global VOICE_CONTROL_AVAILABLE, AV_AVAILABLE
+        global AUDIO_PLAYER_AVAILABLE, YT_AVAILABLE
+        try:
+            if not VOICE_CONTROL_AVAILABLE:
+                import voice_control as _vc
+                VoiceControl = _vc.VoiceControl
+                VOICE_CONTROL_AVAILABLE = True
+                if getattr(self, "voice", None) is None:
+                    try:
+                        self.voice = VoiceControl()
+                        self.voice_available = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            if not AV_AVAILABLE:
+                import audiovault_client as _av
+                av = _av
+                AV_AVAILABLE = True
+        except Exception:
+            pass
+        try:
+            if not AUDIO_PLAYER_AVAILABLE:
+                import audio_player as _ap
+                AudioPlayer = _ap.AudioPlayer
+                AUDIO_PLAYER_AVAILABLE = True
+                if getattr(self, "player", None) is None:
+                    try:
+                        self.player = AudioPlayer()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            if not YT_AVAILABLE:
+                import youtube_client as _yt
+                yt = _yt
+                YT_AVAILABLE = True
+        except Exception:
+            pass
+
+    def _ensure_requirements(self, force=False):
+        """Get every library the app needs, one at a time.
+
+        Ashley, 2026-11-27: whatever requirements she needs
+        for Command Prompt, the app should just get them and
+        install them itself, so she never has to do it in
+        Command Prompt. On startup (chained from
+        _ensure_edge_tts, which runs first for the reading
+        voice) and on the 1-minute retry, this checks every
+        library in _REQUIRED_LIBRARIES and installs any that
+        are missing, in the background, one at a time — never
+        two pip installs at once. The reading voice itself is
+        skipped here: it has its own install and retry, and
+        this must never start a second install while that one
+        runs. After each library, a module that was missing at
+        startup is loaded (see _reload_missing_modules), so
+        its feature comes alive without a restart. When a
+        library fails, Samantha says the plain reason once
+        (see _on_requirement_failed) and the app retries by
+        itself in 1 minute. When everything required is
+        ready, Samantha says so in the reading voice (see
+        _on_requirements_ready). No NVDA and no Microsoft
+        voice is ever used for any of this.
+        """
+        lock = getattr(self, "_requirements_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._requirements_lock = lock
+        with lock:
+            if getattr(self, "_requirements_running", False):
+                return
+            if getattr(self, "_edge_install_running", False):
+                return
+            if not self._requirements_should_retry(force=force):
+                return
+            self._requirements_running = True
+        installed_any = False
+        try:
+            self._requirements_last_try = time.time()
+            self._requirements_announced_started = False
+            missing = []
+            for entry in _REQUIRED_LIBRARIES:
+                import_name = entry[0]
+                if import_name == "edge_tts":
+                    continue
+                if not self._library_available(import_name):
+                    missing.append(entry)
+            if not missing:
+                self._reload_missing_modules()
+                return
+            try:
+                wx.CallAfter(self._announce_requirements_started)
+            except Exception:
+                pass
+            for import_name, pip_name, _spoken, required in missing:
+                try:
+                    self._requirements_state[import_name] = "installing"
+                except Exception:
+                    pass
+                try:
+                    ok, reason = self._install_one_library(
+                        import_name, pip_name)
+                except Exception as e:
+                    ok, reason = False, "the install did not finish: " \
+                        + str(e)[:100]
+                if ok:
+                    try:
+                        self._requirements_state[import_name] = "ready"
+                    except Exception:
+                        pass
+                    installed_any = True
+                    try:
+                        self.logger.log_playback(
+                            "REQUIREMENTS",
+                            "Installed " + pip_name)
+                    except Exception:
+                        pass
+                    self._reload_missing_modules()
+                else:
+                    try:
+                        self._requirements_state[import_name] = "failed"
+                        counts = self._requirements_fail_count
+                        counts[import_name] = counts.get(import_name, 0) + 1
+                        self._requirements_last_reason[import_name] = reason
+                    except Exception:
+                        pass
+                    try:
+                        self.logger.log_error(
+                            "REQUIREMENTS install failed: " + pip_name
+                            + ": " + str(reason))
+                    except Exception:
+                        pass
+                    try:
+                        wx.CallAfter(self._on_requirement_failed,
+                                     import_name, pip_name, reason, required)
+                    except Exception:
+                        pass
+            if installed_any:
+                self._reload_missing_modules()
+            still_missing = [
+                entry for entry in _REQUIRED_LIBRARIES
+                if entry[3] and entry[0] != "edge_tts"
+                and not self._library_available(entry[0])]
+            if still_missing:
+                try:
+                    self._schedule_edge_install_retry()
+                except Exception:
+                    pass
+            elif installed_any:
+                try:
+                    wx.CallAfter(self._on_requirements_ready)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self.logger.log_error(
+                    "REQUIREMENTS error: " + str(e)[:200])
+            except Exception:
+                pass
+            try:
+                self._schedule_edge_install_retry()
+            except Exception:
+                pass
+        finally:
+            self._requirements_running = False
+
+    def _on_requirement_failed(self, import_name, pip_name, reason, required):
+        """A library install failed (main thread).
+
+        Samantha says the plain reason once for this failure,
+        in her own voice — never NVDA, never Microsoft. When
+        the reading voice itself is ready, she says the reason
+        in that voice, so Ashley hears real words ("there is
+        no internet connection right now", "the disk is full")
+        instead of jargon. When the reading voice is not ready
+        either, she says "not ready" once in her recorded
+        voice, unless the reading voice already said it for
+        its own failure — she never says it twice for the same
+        failure. The app retries by itself in 1 minute either
+        way (see _ensure_requirements), so she does not have
+        to ask again or open Command Prompt.
+        """
+        if not required:
+            return
+        # Once per failure: the same library failing again in
+        # the next pass has a higher fail count, so it is
+        # announced again then — but this failure is said
+        # only once, however many times it is asked about.
+        try:
+            key = (import_name,
+                   self._requirements_fail_count.get(import_name, 0))
+            said = self._requirements_failed_said
+            if key in said:
+                return
+            said.add(key)
+        except Exception:
+            pass
+        if self._samantha_voice_mode() == "edge":
+            self._say_in_samantha_voice(
+                "That did not work: " + str(reason)
+                + ". I will try again by myself in a minute.")
+            return
+        if getattr(self, "_edge_install_state", None) == "failed" \
+                and getattr(self, "_edge_install_not_ready_said", 0) \
+                == getattr(self, "_edge_install_fail_count", 0) \
+                and getattr(self, "_edge_install_fail_count", 0) > 0:
+            return
+        self._samantha_reading = True
+        self._play_samantha_sequence(
+            ["samantha_reading_not_ready.wav"],
+            after=self._clear_samantha_reading)
+
+    def _on_requirements_ready(self):
+        """Everything the app needs is ready (main thread).
+
+        Samantha says so in the reading voice itself, so
+        Ashley knows the moment it is finished when she opens
+        the program. Only announced once per run, and only
+        when something was actually installed — if everything
+        was already there, there is nothing new to announce,
+        and the reading voice says so on its own when it
+        becomes ready (see _on_edge_install_ready).
+        """
+        if getattr(self, "_requirements_ready_announced", False):
+            return
+        self._requirements_ready_announced = True
+        if self._samantha_voice_mode() != "edge":
+            return
+        self._say_in_samantha_voice(
+            "Everything is ready now. Ask me to list your shows.")
+
+    def _on_install_requirements(self, event=None):
+        """Menu / voice: get everything the app needs.
+
+        Ashley, 2026-11-27: "install everything I need" — the
+        checkable step for all of the app's requirements, not
+        just the reading voice. Samantha says "I'm on it", the
+        installs run in the background one at a time, and she
+        says when it is all ready (see _on_requirements_ready);
+        if something fails she says the plain reason once, and
+        the app retries by itself in 1 minute. An explicit ask
+        always forces a fresh pass right now, even if a pass
+        just failed a moment ago. If everything is already
+        ready, she just says so instead of installing again.
+        No Command Prompt step is needed for any of this.
+        """
+        missing = [entry for entry in _REQUIRED_LIBRARIES
+                   if not self._library_available(entry[0])]
+        if not missing:
+            self._say_in_samantha_voice(
+                "Everything is ready now. Ask me to list your shows.")
+            return
+        self._requirements_last_try = 0.0
+        try:
+            self.status_label.SetLabel(
+                "Getting everything Audio Vault TV needs ready...")
+        except Exception:
+            pass
+        self._play_sound_effect("samantha_im_on_it.wav")
+        threading.Thread(target=self._ensure_requirements, args=(True,),
                          daemon=True).start()
 
     def _play_dynamic_wav(self, path, words, _retry=0):
