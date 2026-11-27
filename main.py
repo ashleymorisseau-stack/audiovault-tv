@@ -762,10 +762,33 @@ class PlayerFrame(wx.Frame):
     
     def _on_key(self, event):
         """Handle keyboard events"""
+        keycode = event.GetKeyCode()
+        ctrl = event.ControlDown()
+        shift = event.ShiftDown()
+        # Ashley, 2026-11-27: Ctrl+Shift+B "does not seem to
+        # be working". One reason was here: when focus was in
+        # the "Type to Samantha" box, this handler returned
+        # early for EVERY key — including Ctrl+Shift+B and
+        # Ctrl+Shift+W — so pressing B while in the box did
+        # nothing at all. And the box is where focus usually
+        # is: it keeps focus after Enter, and it is where she
+        # types. So the voice keys are handled first, whatever
+        # has focus, and only the other keys are handed to
+        # the box.
+        if ctrl and shift and keycode == ord('B'):
+            self._toggle_voice_listening()
+            return
+        if ctrl and shift and keycode == ord('W'):
+            self._toggle_wake_word_mode()
+            return
+        if ctrl and shift and keycode == ord('Q'):
+            self._on_toggle_nvda_quiet()
+            return
         # Typing in the command box: let the box have every
-        # key (Space types a space, Enter sends the command,
-        # arrows move the caret) instead of the app hotkeys,
-        # which would otherwise pause playback on Space.
+        # other key (Space types a space, Enter sends the
+        # command, arrows move the caret) instead of the app
+        # hotkeys, which would otherwise pause playback on
+        # Space.
         if getattr(self, "command_box", None) is not None:
             try:
                 if wx.Window.FindFocus() is self.command_box:
@@ -773,9 +796,6 @@ class PlayerFrame(wx.Frame):
                     return
             except Exception:
                 pass
-        keycode = event.GetKeyCode()
-        ctrl = event.ControlDown()
-        shift = event.ShiftDown()
         
         if keycode == wx.WXK_SPACE:
             self._toggle_play_pause()
@@ -1421,8 +1441,66 @@ class PlayerFrame(wx.Frame):
                     seconds = int(pos % 60)
                     self.position_label.SetLabel(f"{minutes}:{seconds:02d}")
                 
-                # Auto-advance to next file when current finishes
-                if not self.player.is_busy() and self.player.is_playing:
+                # Auto-advance to next file when current finishes.
+                # Ashley, 2026-11-27: play the whole series, then
+                # the next channel, and so on — and do NOT wait
+                # for quiet moments. There is NO quiet-tick
+                # counting here at all: no 1-tick and no 3-tick
+                # check, nothing that guesses "finished" from the
+                # mixer being quiet for a moment. A file only
+                # advances when pygame itself says it really
+                # ended, in one of two ways:
+                #   1. The music-end event: pygame posts it when
+                #      a track finishes (see AudioPlayer.
+                #      music_ended()). A momentary mixer hiccup
+                #      or a quiet passage mid-file never posts
+                #      it, so it can never cut a show off early.
+                #   2. Backup, only if the end event never
+                #      arrives: pygame says the music is not
+                #      playing at all (position -1) AND the
+                #      mixer is not busy AND we were well into
+                #      the file (past 5 seconds in). The first
+                #      moments after pressing play can never
+                #      look like an ending, and a single
+                #      not-busy tick on its own never advances
+                #      anything — it needs the position to say
+                #      the music stopped too.
+                # If neither says the file ended, the show just
+                # keeps playing — even if the mixer goes quiet
+                # for a moment. That is the safe failure: never
+                # jump ahead, never stop in the middle.
+                try:
+                    _current = self.playlist.get_current()
+                except Exception:
+                    _current = None
+                if _current != getattr(self, "_timer_playing_file", None):
+                    self._timer_playing_file = _current
+                    self._last_music_pos_s = 0
+                try:
+                    _busy_now = bool(self.player.is_busy())
+                except Exception:
+                    _busy_now = True
+                if _busy_now and pos and pos > 0:
+                    self._last_music_pos_s = pos
+                _ended = False
+                _music_ended = getattr(self.player, "music_ended", None)
+                if callable(_music_ended):
+                    try:
+                        _ended = bool(_music_ended())
+                    except Exception:
+                        _ended = False
+                if not _ended:
+                    _raw_pos = None
+                    _music_pos = getattr(
+                        self.player, "music_position_ms", None)
+                    if callable(_music_pos):
+                        try:
+                            _raw_pos = _music_pos()
+                        except Exception:
+                            _raw_pos = None
+                    _ended = (_raw_pos == -1 and not _busy_now
+                              and getattr(self, "_last_music_pos_s", 0) > 5)
+                if _ended:
                     current_file = self.playlist.get_current_file_name()
                     current_folder = self.playlist.get_current_folder_name()
                     
@@ -1439,6 +1517,16 @@ class PlayerFrame(wx.Frame):
                         
                         self._load_current_file()
                         self.player.play()
+                        # The new file is playing: forget the old
+                        # file's position, so the backup end
+                        # check (past 5 seconds in) can never
+                        # fire on a file that only just started.
+                        self._last_music_pos_s = 0
+                        try:
+                            self._timer_playing_file = \
+                                self.playlist.get_current()
+                        except Exception:
+                            pass
                         # Say this show's own name when the next file in
                         # the same channel starts, too.
                         channel_name = self.channels.current_channel or ""
@@ -1655,62 +1743,134 @@ class PlayerFrame(wx.Frame):
                 return
         
         if self.is_voice_listening:
-            # Stop listening
-            self._want_continuous = False
-            self.voice.stop_listening()
-            self.is_voice_listening = False
-            self._play_end_chime()
-            msg = "Voice control stopped"
-            # In Samantha's voice, not NVDA speak(): NVDA is
-            # quiet in the app, so speak() would be silent.
+            # Ashley, 2026-11-27: Ctrl+Shift+B "does not seem
+            # to be working". One reason: pressing it a second
+            # time — for example because she heard nothing
+            # after the first press — used to STOP listening,
+            # so the press that was meant as "try again"
+            # switched it off instead. The window is only 20
+            # seconds and ends by itself, so a second press
+            # now just says so, in Samantha's own voice, and
+            # keeps the window running. There is no need for
+            # a stop key: one press, one turn, then it stops
+            # on its own.
             self._answer_in_samantha_voice(
-                msg, "samantha_excuse_me.wav")
+                "I'm already listening. Go ahead.",
+                "samantha_im_on_it.wav")
+            return
         else:
             # Start listening in a separate thread
             # Honey, 2026-11-23 evening: Samantha says "I'm listening"
             # when she starts listening, so Honey knows she is ready.
             # Ashley, 2026-11-26: high chime, then the low chime
             # 2 seconds later, and she still has 20 seconds to speak.
-            self._want_continuous = True
+            # Ashley, 2026-11-27: press-to-talk only. This is ONE
+            # listening turn: when it ends (command heard, or
+            # silence), listening stops and does NOT start again
+            # by itself. She presses Ctrl+Shift+B again for the
+            # next command. _want_continuous stays False.
+            self._want_continuous = False
             self._start_listening(chimes=True)
     
     def _start_listening(self, chimes=True):
         """Start one-time listening (20 seconds) in a thread.
 
-        chimes=True rings the high-then-low wake chimes, for a
-        fresh start (Ctrl+Shift+B, or after the startup greeting).
-        chimes=False starts silently, for the automatic re-arm
-        after a command — she is already talking to Samantha,
-        so the chimes would only interrupt her.
+        Press-to-talk only, Ashley 2026-11-27: this runs only
+        because she pressed Ctrl+Shift+B. When the turn ends,
+        listening stops and never restarts itself (see
+        _rearm_listening, which now does nothing).
+        chimes=True rings the high-then-low wake chimes, for
+        that fresh press.
         """
         self.is_voice_listening = True
         if chimes:
             self._play_wake_chimes()
         msg = "I'm listening"
         self.status_label.SetLabel(msg)
-        speak(msg)
-        
+        # Ashley, 2026-11-27: Ctrl+Shift+B "does not seem to
+        # be working". This used to say "I'm listening" with
+        # speak() — NVDA — which is silent while NVDA quiet
+        # is on, so after pressing B she heard only the
+        # chimes and nothing telling her listening had
+        # started. Now Samantha says it herself, in her own
+        # voice (reading voice when ready, "I'm on it" clip
+        # when not). The chimes still ring first.
+        self._answer_in_samantha_voice(msg)
+        # Ashley, 2026-11-27: the listen thread used to start
+        # in the same breath as the chimes, so the first ~6
+        # seconds of her 20-second window were spent with
+        # the high chime (4.6 s) and low chime (1.6 s)
+        # ringing into the microphone — and she speaks
+        # slowly, so a slow answer could run out of window.
+        # Now the microphone opens only once the chimes have
+        # actually finished, and she gets the full 20
+        # seconds from then. _begin_listen_thread checks
+        # she is still listening before starting.
+        if chimes:
+            try:
+                ms = (self._clip_ms(
+                    Path(__file__).parent / "sounds"
+                    / "start_of_request.wav")
+                    + self._clip_ms(
+                        Path(__file__).parent / "sounds"
+                        / "end_of_request.wav") + 300)
+            except Exception:
+                ms = 6500
+            wx.CallLater(ms, self._begin_listen_thread)
+        else:
+            self._begin_listen_thread()
+
+    def _begin_listen_thread(self, _waited_ms=0):
+        """Open the microphone for a press-to-talk turn.
+
+        Only runs when a turn is still wanted (she has not
+        pressed anything else since). Separated from
+        _start_listening so the thread starts after the
+        wake chimes finish, not during them.
+        Ashley, 2026-11-27: also wait until Samantha herself
+        is quiet — her "I'm listening" reading, or a clip
+        still playing — before opening the microphone. The
+        old code opened it on a fixed timer, so it could
+        open while she was still speaking and hear her own
+        voice as a command ("I'm listening" heard back as
+        words she never said, then "Excuse me"). Waits up
+        to 15 seconds, then opens anyway, so a stuck flag
+        can never leave her with no listening at all.
+        """
+        if not getattr(self, "is_voice_listening", False):
+            return
+        _busy = bool(getattr(self, "_samantha_reading", False))
+        if not _busy:
+            try:
+                _busy = bool(self._samantha_channel().get_busy())
+            except Exception:
+                _busy = False
+        if _busy and _waited_ms < 15000:
+            wx.CallLater(500, self._begin_listen_thread,
+                         _waited_ms + 500)
+            return
         thread = threading.Thread(target=self._voice_listen_thread, daemon=True)
         thread.start()
     
     def _rearm_listening(self):
-        """Listen again after a command, so Samantha responds
-        every time Ashley asks something, without her having to
-        press Ctrl+Shift+B again. Only re-arms while continuous
-        listening is wanted and nothing else is listening. If
-        Samantha is still reading something out loud, wait and
-        try again in a few seconds, so listening does not hear
-        her own reading as if it were a command."""
-        if getattr(self, "_samantha_reading", False):
-            wx.CallLater(5000, self._rearm_listening)
-            return
-        if not getattr(self, "_want_continuous", False):
-            return
-        if not self.voice_available:
-            return
-        if self.is_voice_listening or self.wake_word_mode:
-            return
-        self._start_listening(chimes=False)
+        """Press-to-talk only (Ashley, 2026-11-27): this does
+        nothing now, on purpose.
+
+        It used to listen again by itself after a command —
+        8 seconds later, with no button press and no wake
+        word, even while a show was playing. Words from the
+        show itself were then heard as commands, and a
+        "stop" / "pause" / "play" in the dialogue paused the
+        show in the middle. That is also why Samantha kept
+        answering words nobody said to her. Now, after a
+        command (or silence), listening stops and stays
+        stopped until Ashley presses Ctrl+Shift+B again for
+        the next command. Ctrl+Shift+W is the only
+        always-listening mode, and only she turns it on.
+        Kept as a method so any already-scheduled call to
+        it is harmless.
+        """
+        return
     
     def _voice_listen_thread(self):
         """Thread for voice listening"""
@@ -1744,13 +1904,14 @@ class PlayerFrame(wx.Frame):
                     return
 
             if text:
-                # A command was heard. Keep listening for the
-                # next one: re-arm 8 seconds later, once the
-                # answer to this command has been spoken. If
-                # nothing is heard next time, listening stops
-                # quietly instead of looping "Excuse me".
-                wx.CallAfter(
-                    lambda: wx.CallLater(8000, self._rearm_listening))
+                # A command was heard. Press-to-talk only
+                # (Ashley, 2026-11-27): listening ends here.
+                # It used to re-arm itself 8 seconds later
+                # with no press, and then hear the show as a
+                # command and pause it. No re-arm now — she
+                # presses Ctrl+Shift+B again for the next
+                # command, or uses Ctrl+Shift+W wake-word
+                # mode if she wants always-listening.
                 # Parse command
                 command = self.voice.parse_command(text)
                 
@@ -2231,8 +2392,19 @@ class PlayerFrame(wx.Frame):
             # is NVDA and silent while NVDA quiet is on, so a
             # typed command she did not understand was met with
             # silence.
+            # Ashley, 2026-11-27: "Excuse me" used to say
+            # nothing about what she actually heard, so she
+            # had no way to know what went wrong. Now Samantha
+            # says the words she heard, and gives one example
+            # of what to say — in her own voice, never NVDA,
+            # never Microsoft. This only runs when words were
+            # really heard but matched no command; silence
+            # goes to _voice_no_command instead, so "Excuse
+            # me, I didn't understand" is never said for
+            # nothing at all.
             msg = (f"Excuse me, I didn't understand {text}. "
-                   "Could you say that again?")
+                   "I heard " + str(text) + ". "
+                   "Try saying, list shows, or play Doctor Who.")
             self._answer_in_samantha_voice(
                 msg, "samantha_excuse_me.wav")
             return
@@ -2310,17 +2482,37 @@ class PlayerFrame(wx.Frame):
             # call button, as soon as she calls Samantha with Ctrl+Shift+W,
             # not only after Samantha is heard. Ashley, 2026-11-26:
             # high chime first, then the low chime 2 seconds later.
+            # Ashley, 2026-11-27: if a Ctrl+Shift+B turn is already
+            # listening, do not start a second listener on top of
+            # it — the two share one microphone and one recogniser,
+            # so they would hear each other. Say so and keep the
+            # B turn running; she presses W again after it ends.
+            if getattr(self, "is_voice_listening", False):
+                self._answer_in_samantha_voice(
+                    "I'm already listening. Go ahead.",
+                    "samantha_im_on_it.wav")
+                return
             self.wake_word_mode = True
             # Wake-word mode has its own continuous loop, so
             # one-time listening must not re-arm on top of it.
             self._want_continuous = False
             self._excuse_me_said = False
             self._play_wake_chimes()
-            # Honey, 2026-11-23 evening: Samantha says "I'm listening"
-            # when wake-word mode starts, too. Ashley, 2026-11-26:
-            # she answers to Samantha, Sam, Sammy, Guide, or Metro.
-            msg = ("I'm listening. Say 'Samantha', 'Sam', 'Sammy', "
-                   "'Guide', or 'Metro', followed by a command.")
+            # Ashley, 2026-11-27: Ctrl+Shift+W turns on
+            # always-listening wake-word mode. She then says
+            # Samantha's name — Samantha, Sam, Sammy, Guide,
+            # or Metro — followed by her command, and Samantha
+            # answers "Yes?" and then hears the command.
+            # The announcement below deliberately does NOT
+            # speak the wake words out loud: the old wording
+            # said "Say 'Samantha', 'Sam', 'Sammy'..." in
+            # Samantha's own reading voice, and the microphone
+            # — already listening — heard her own voice saying
+            # "Samantha" and answered itself, then heard the
+            # rest of the announcement as a command and said
+            # "Excuse me". "Say my name" says the same thing
+            # without ever speaking a wake word.
+            msg = "I'm listening. Say my name, then your command."
             # In Samantha's voice, not NVDA speak(): NVDA is
             # quiet in the app, so speak() would be silent.
             self._answer_in_samantha_voice(msg)
@@ -2355,6 +2547,15 @@ class PlayerFrame(wx.Frame):
         # (sounds/samantha_yes.wav), then listens for the
         # command. The "Hi Sweetie, how are you doing?"
         # greeting stays for startup and the greet command.
+        # Ashley, 2026-11-27: if Samantha herself is still
+        # reading something out loud (the list, the guide),
+        # do not play "Yes?" over it — the microphone may
+        # have heard her own reading, not Ashley, and a
+        # "Yes?" on top of the reading would only add a
+        # second voice. The command window in voice_control
+        # still runs, so a real command spoken now is heard.
+        if getattr(self, "_samantha_reading", False):
+            return
         self._play_sound_effect("samantha_yes.wav")
         # Samantha greets Ashley by name, when she has told Samantha
         # her name by voice (see _parse_name_command / _set_user_name).
@@ -3208,30 +3409,28 @@ class PlayerFrame(wx.Frame):
         wx.CallLater(ms, self._listen_after_greeting)
 
     def _listen_after_greeting(self):
-        """Start one-time listening after the startup sequence
-        (announcement, greeting, channel list) has finished,
-        unless voice control is off or already listening.
-        One voice at a time: if Samantha is still reading
-        something out loud, wait and try again in a couple
-        of seconds, so listening does not start while she is
-        talking and hear her own voice as a command."""
-        if getattr(self, "_samantha_reading", False):
-            wx.CallLater(2000, self._listen_after_greeting)
-            return
+        """After the startup greeting: do NOT start listening.
+
+        Press-to-talk only, Ashley 2026-11-27: Samantha must
+        wait for a button press before she tries to understand
+        anything. This used to start one-time listening by
+        itself as soon as the greeting finished — so the app
+        was listening in the background while a show played,
+        heard the show as commands, and paused it. Now the
+        greeting ends quietly: she presses Ctrl+Shift+B when
+        she wants to talk (one turn), or Ctrl+Shift+W for
+        wake-word mode (always listening, until she turns it
+        off). The one thing this still does: if listening is
+        not available at all, say so once, in Samantha's own
+        voice, so she is not left wondering why pressing B
+        does nothing — the model install is already running
+        by itself, and _on_vosk_model_ready announces when
+        it is ready.
+        """
         if not self.voice_available:
-            # Ashley, 2026-11-27: this used to return silently
-            # when listening was not available, so after the
-            # greeting Samantha just never listened and Ashley
-            # heard nothing about why. Say so once, in
-            # Samantha's own voice (see
-            # _say_listening_not_ready); when the model
-            # finishes installing, _on_vosk_model_ready
-            # starts listening from here.
             self._say_listening_not_ready()
             return
-        if self.is_voice_listening or self.wake_word_mode:
-            return
-        self._toggle_voice_listening()
+        return
     
     def _ask_channel_to_play(self, prompt_message):
         """Ask which channel to play"""
@@ -5827,13 +6026,19 @@ class PlayerFrame(wx.Frame):
             # recording that is still playing ("I'm on it",
             # the guide intro, the greeting) to finish, so
             # the reading never talks over it. At most about
-            # 8 seconds; then speak anyway, so a long show
-            # playing in the background does not hold the
-            # reading back forever.
+            # 8 seconds; then speak anyway.
+            # Ashley, 2026-11-27: this used to wait on the
+            # whole mixer's busy flag, which is True whenever
+            # ANYTHING is playing — including the show itself
+            # on the music stream. So while Classic Doctor Who
+            # was playing, every reading waited the full 8
+            # seconds for a show that was never going to stop.
+            # Now it waits only on Samantha's own channel, so
+            # a show playing in the background no longer holds
+            # a reading back at all.
             for _ in range(40):
                 try:
-                    import pygame
-                    if not pygame.mixer.get_busy():
+                    if not self._samantha_channel().get_busy():
                         break
                 except Exception:
                     break
@@ -6725,9 +6930,10 @@ class PlayerFrame(wx.Frame):
           later instead of starting a second install.
         - Samantha says "I'm on it" while it downloads, and
           when it is ready she says she can hear now (see
-          _on_vosk_model_ready) and starts listening after
-          the greeting, as normal. No NVDA, no Microsoft
-          voice, no Command Prompt, no new voice files.
+          _on_vosk_model_ready). She never starts listening
+          by herself — press-to-talk only (see _rearm_listening).
+          No NVDA, no Microsoft voice, no Command Prompt,
+          no new voice files.
         force=True (an explicit "install the listening
         model") skips the 60-second gap between tries.
         """
@@ -6928,9 +7134,9 @@ class PlayerFrame(wx.Frame):
         her own voice (the reading voice when it is up, or
         her recorded "Yes?" clip when it is not — the words
         themselves cannot be spoken without the reading
-        voice), and then starts listening after the greeting,
-        as normal, so Ashley can say a command straight away
-        without pressing anything. Only announced when
+        voice), and then waits for her to press a button —
+        press-to-talk only, Ashley 2026-11-27: she never
+        starts listening by herself. Only announced when
         listening was NOT available before: when the model
         was already there at startup, the greeting flow owns
         listening and nothing extra is said. The
@@ -6951,13 +7157,14 @@ class PlayerFrame(wx.Frame):
         self._answer_in_samantha_voice(
             "I can hear you now. Ask me to list your shows.",
             "samantha_yes.wav")
-        # Start listening now, as after the greeting: the
-        # greeting already passed while listening was not
-        # ready, so without this her next words would still
-        # never be heard. _listen_after_greeting waits while
-        # Samantha is still reading, so it does not hear her
-        # own announcement as a command.
-        self._listen_after_greeting()
+        # Press-to-talk only, Ashley 2026-11-27: do NOT start
+        # listening here. This used to call
+        # _listen_after_greeting, which started listening by
+        # itself the moment the model finished installing —
+        # in the background, while a show was playing. Now
+        # Samantha just announces she can hear, and waits
+        # for Ctrl+Shift+B (one turn) or Ctrl+Shift+W
+        # (wake-word mode).
 
     def _on_vosk_model_failed(self):
         """The model install failed (main thread).
@@ -7549,6 +7756,36 @@ class PlayerFrame(wx.Frame):
         for name in names:
             if q in name.lower():
                 return name
+        # Ashley, 2026-11-27: a slightly misheard name still
+        # found nothing here ("doctor who" said a little
+        # differently, a dropped word), so Samantha said she
+        # does not have a show she does have — Classic Doctor
+        # Who included. Fall back to the closest channel name
+        # (same idea as the live-TV fuzzy match), instead of
+        # giving up: exact words, word overlap, and letter
+        # closeness, spaceless too.
+        import difflib
+        q_words = set(q.split())
+        best = None
+        best_score = 0.0
+        for name in names:
+            n = name.lower()
+            n_words = set(n.split())
+            score = difflib.SequenceMatcher(None, q, n).ratio()
+            score = max(score, difflib.SequenceMatcher(
+                None, q.replace(" ", ""), n.replace(" ", "")).ratio())
+            if n_words <= q_words:
+                score = max(score, 0.95)
+            if q_words <= n_words:
+                score = max(score, 0.9)
+            if q_words and n_words:
+                overlap = len(q_words & n_words) / len(q_words)
+                if overlap >= 0.5:
+                    score = max(score, 0.55 + 0.45 * overlap)
+            if score > best_score:
+                best, best_score = name, score
+        if best is not None and best_score >= 0.6:
+            return best
         return None
 
     def _on_delete_channel_downloads(self, event=None):

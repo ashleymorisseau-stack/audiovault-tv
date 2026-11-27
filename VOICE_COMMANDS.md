@@ -46,9 +46,23 @@ Samantha now speaks in her own recorded voice, not just NVDA. Her voice is frien
 - When you ask "what is your name", she answers in her own voice: "Hi, my name is Samantha. What is your name?"
 - Her voice files are in the sounds folder: samantha_greeting.wav (3.4 seconds) and samantha_what_to_watch.wav (1.6 seconds).
 
+## How to Talk to Samantha — Press a Button First (2026-11-27)
+
+Samantha only listens when you press a button. She never listens in the background while a show is playing, and she never starts listening by herself — not after the greeting, and not after she answers a command. That was the bug: she was listening all the time, heard the show itself as commands ("playing", "stopped", "playback"), and paused the show in the middle of it. Now the show keeps playing unless you ask her to change it.
+
+- **Ctrl+Shift+B — press once to talk.** Press it, Samantha says "I'm listening" in her own voice (after the high chime, then the low chime), then she listens for one command for 20 seconds, understands it, answers, and stops listening. You do NOT say her name first — just press B and speak. If you press B again while she is already listening, she says "I'm already listening. Go ahead." instead of switching herself off. B works even when the cursor is in the text box.
+- **Ctrl+Shift+W — always listen, wake-word mode.** Press it once and it stays on. Samantha says "I'm listening. Say my name, then your command." Then you say her name — Samantha, Sam, Sammy, Guide, or Metro — followed by your command, for example "Samantha, list shows" or "Sam, play Classic Doctor Who". When she hears her name she answers "Yes?" in her own voice, then listens for the command (15 seconds after the name, or in the same breath). She stays in this mode, so you can say her name again for the next command. Press Ctrl+Shift+W again to turn it off.
+- If you say nothing, she stops quietly instead of repeating "Excuse me". If she hears words but cannot understand them, she says what she did hear and gives one example: "Excuse me, I didn't understand list me shows. I heard list me shows. Try saying, list shows, or play Doctor Who."
+
+She understands the same command said several ways, and she fixes the words Vosk often hears wrong: "list shows", "list my shows", "list me shows", "what shows do I have", "what do I have to watch", "show me what shows I have", "play Doctor Who", "play Classic Doctor Who", "watch Classic Doctor Who" — and "please" or "thank you" at the end never breaks it. She already has Classic Doctor Who, so "play Classic Doctor Who" just plays it — she does not search or download it again.
+
+## Playing a Whole Series — No Quiet Moments (2026-11-27)
+
+A show plays all the way through. When one file really finishes, the next file in the same channel plays; when the whole channel (the whole series) is finished, the next channel plays, and so on, so you can sleep with it on and it keeps going. It never moves on because the sound went quiet for a moment — there is no quiet-moment check at all, not one moment and not three. It only moves on when pygame itself says the track finished (its own music-end signal), or, as a backup, when pygame says the music is not playing at all and you were well into the file. A quiet passage in the middle of an episode, or a brief hiccup, never stops it or jumps it ahead.
+
 ## Wake Words — Samantha, Sam, Sammy, Guide, Metro
 
-Samantha answers to five wake words: Samantha, Sam, Sammy, Guide, and Metro. Say any one of them, then your command — for example "Sam, play Friends" or "Guide, what are my options?" When she hears her name she answers "Yes?" in her own recorded voice (sounds/samantha_yes.wav), then listens for your command. You still call her Samantha most of the time; the other names are there when you want them.
+Samantha answers to five wake words, in wake-word mode only (Ctrl+Shift+W, see above): Samantha, Sam, Sammy, Guide, and Metro. Say any one of them, then your command — for example "Sam, play Friends" or "Guide, what are my options?" When she hears her name she answers "Yes?" in her own recorded voice (sounds/samantha_yes.wav), then listens for your command. You still call her Samantha most of the time; the other names are there when you want them.
 
 ## "I'm Good" — Samantha Answers, Then Lists Your Channels and What's Next
 
@@ -73,6 +87,10 @@ Ask Samantha, by voice, "What are my options?" or "tell me the list of shows I h
 | "tell me the list of shows I have" | Same as above |
 | "what shows do I have" | Same as above |
 | "list all the shows" | Same as above |
+| "list my shows" | Same as above |
+| "list me shows" | Same as above — Vosk hears "my" as "me", and that is fixed now |
+| "what do I have to watch" | Same as above |
+| "show me what shows I have" | Same as above |
 | "list all the channels I have" | Samantha reads the list of channels you have |
 
 ## Loading Is Silent — Samantha Greets You in Her Voice
@@ -97,7 +115,7 @@ When you ask Samantha "can you hear me", "do you hear me", or "are you listening
 
 Listening (Vosk) and speaking (Edge TTS, the reading voice) are separate. "My reading voice is ready" means she can read the list out loud; it does not mean she can hear you. Hearing needs a second thing, a listening model — a folder called vosk-model-small-en-us-0.15 beside main.py. That folder was the missing piece: the app used to pip-install the listening library, but it never downloaded the model itself, so VoiceControl() failed at startup and listening stayed off for the whole run, while the reading voice said it was ready. And when you pressed Ctrl+Shift+B or Ctrl+Shift+W, the answer went through NVDA, which is quiet in the app, so you heard nothing at all — not even that listening was off.
 
-Now the app downloads and installs the listening model itself, in the background, when it opens — about 40 MB from alphacephei.com, unzipped beside main.py, with a double-nested folder flattened so the model ends up exactly where it is looked for. The listening libraries themselves (Vosk and sounddevice) are also loaded only when they are needed now, so a missing library no longer stops the app from opening or typing from working — listening just stays off, with a plain reason, until the app installs the library and tries again by itself. It checks disk space first (under 200 MB free fails plainly instead of filling the disk), says "I'm on it" while it downloads, and retries by itself every 1 minute if a try fails, with the plain reason in the app log ("VOSK MODEL install failed: ..."). One install at a time, never two at once. When the model is ready, Samantha says "I can hear you now. Ask me to list your shows." in her own voice, and then starts listening after the greeting, as normal, so you can say a command straight away without pressing anything. If the model was already there when the app opened, nothing is downloaded and nothing extra is said — the greeting flow owns listening then.
+Now the app downloads and installs the listening model itself, in the background, when it opens — about 40 MB from alphacephei.com, unzipped beside main.py, with a double-nested folder flattened so the model ends up exactly where it is looked for. The listening libraries themselves (Vosk and sounddevice) are also loaded only when they are needed now, so a missing library no longer stops the app from opening or typing from working — listening just stays off, with a plain reason, until the app installs the library and tries again by itself. It checks disk space first (under 200 MB free fails plainly instead of filling the disk), says "I'm on it" while it downloads, and retries by itself every 1 minute if a try fails, with the plain reason in the app log ("VOSK MODEL install failed: ..."). One install at a time, never two at once. When the model is ready, Samantha says "I can hear you now. Ask me to list your shows." in her own voice. She still waits for you to press a button — she never starts listening by herself (see "How to Talk to Samantha" above). If the model was already there when the app opened, nothing is downloaded and nothing extra is said.
 
 You can also ask for it directly, any time: say or type "install the listening model" (or "get Samantha listening", or "make Samantha listen"), or use Controls, then "Install the Listening Model". That always forces a fresh try right now, even if a try just failed a moment ago. Samantha says "I'm on it", the download runs in the background, and when it is ready she says she can hear now. If she can already hear, she just says so instead of downloading again.
 
@@ -105,9 +123,9 @@ Pressing Ctrl+Shift+B or Ctrl+Shift+W when listening is not available is no long
 
 There is no Command Prompt step for any of this any more. No NVDA or Microsoft voice is ever used for these announcements — Samantha's own voice only. The wake words (Samantha, Sam, Sammy, Guide, Metro), her full name (Samantha Hernandez Right), Ctrl+Shift+Q (NVDA quiet), Ctrl+Shift+G (TV guide), the reading voice, the text box, and the chimes (once each) are all unchanged.
 
-## "I'm Good" — Fixed So You Actually Hear the List
+## "I'm Good" — Answer Her After You Press B (or in Wake-Word Mode)
 
-When Samantha greets you at startup and asks how you are doing, she now starts listening right after the greeting, so when you answer "I'm good" she actually hears it — before, nobody was listening until you pressed Ctrl+Shift+B or said a wake word. After her recorded reply, she reads your shows and what's coming up next. That list and guide were going silent when NVDA quiet was on, because they are read through NVDA and NVDA was quiet — so now NVDA quiet turns off just for that reading, and back on again after it finishes.
+When Samantha greets you at startup and asks how you are doing, she does NOT start listening by herself — she waits for you to press a button (see "How to Talk to Samantha" above), because listening by itself was hearing the show and cutting it off. So to answer her: press **Ctrl+Shift+B** and say "I'm good", or press **Ctrl+Shift+W** and say "Samantha, I'm good". After her recorded reply ("That's wonderful! I'm so glad you're doing good."), she reads your shows and what's coming up next. That list and guide are read in Samantha's own reading voice, never NVDA — NVDA stays quiet for all of it.
 
 ## Startup — What Samantha Says When the App Opens
 
@@ -115,9 +133,9 @@ When Audio Vault TV opens, Samantha does this, one thing at a time, in her own v
 
 1. She says "Audio Vault TV" (sounds/audio_vault_tv.wav, her own recorded voice, about 2 seconds).
 2. She greets you: "Hi Sweetie! How are you doing? What do you want to watch?" — that is also her asking what channels you want.
-3. She listens right away for your answer. If you say "I'm good", she says "That's wonderful! I'm so glad you're doing good." and then names the channels you have and what comes up next. If you name a show, it plays. If you say nothing, she names the channels anyway and listens again so you can pick one.
+3. She waits for you to press a button. Press **Ctrl+Shift+B** and say "I'm good", and she says "That's wonderful! I'm so glad you're doing good." and then names the channels you have and what comes up next. Or press **Ctrl+Shift+W** and say "Samantha, I'm good" — same answer. If you name a show after pressing B, it plays. If you say nothing, she stays quiet — she does not listen by herself, and she does not name the channels until you ask.
 
-Listening starts as soon as the greeting finishes, because you answer "I'm good" right away — an earlier version read the list first and only listened after it, so your answer was never heard and Samantha kept saying "Excuse me". She also waits longer between your words now (4 seconds instead of 2.5), so she hears every word even if you pause. And in wake-word mode she says "Excuse me" only once in a row, then stays quiet and keeps listening, instead of repeating it.
+She waits longer between your words now (4 seconds instead of 2.5), so she hears every word even if you pause. And in wake-word mode she says "Excuse me" only once in a row, then stays quiet and keeps listening, instead of repeating it.
 
 ## Samantha Reads the List Herself — No NVDA, No Microsoft
 
@@ -178,7 +196,7 @@ Why Enter used to do nothing you could hear: the commands did run, but nearly ev
 
 When you ask Samantha to do work — search for a show, download one, play a channel, list your shows, read the guide — she answers "I'm on it" in her own voice right away, so you know she heard you and is working on it. The answer itself waits until "I'm on it" has finished: the old code started the answer in the same breath, so the two talked over each other. Quick replies (how you are doing, "can you hear me", your name, play/pause, skipping) answer directly instead.
 
-Once she hears you, she keeps listening for the next thing you ask, without you having to press Ctrl+Shift+B again. She listens quietly (no chimes) after each answer, for 20 seconds at a time. If you say nothing, she stops quietly instead of repeating "Excuse me". Press Ctrl+Shift+B to stop her listening, or Ctrl+Shift+W for wake-word mode, which has its own loop.
+After a Ctrl+Shift+B turn, she stops listening — one press, one command, then she is done, and the show keeps playing. Press B again for the next command. In wake-word mode (Ctrl+Shift+W) she keeps listening for her name, so you can say "Samantha" again for the next command without pressing anything. If you say nothing, she stops quietly instead of repeating "Excuse me". Press Ctrl+Shift+W again to turn wake-word mode off.
 
 ## NVDA Quiet — the Toggle, Made Robust
 
@@ -192,7 +210,7 @@ When you choose one — "play Friends", "watch Classic Doctor Who" — she tells
 
 ## Wake Chimes — Start Once, Then End Once, Separate
 
-When Samantha starts listening — Ctrl+Shift+B or Ctrl+Shift+W — the start of request sound plays once (sounds/start_of_request.wav, one long high C), then the end of request sound plays once (sounds/end_of_request.wav, medium G to medium C). Each one plays once only, and they play separately, never at the same time: the high chime lasts about 5 seconds, so the low chime waits until the high chime has finished, plus a short quiet gap, before it plays. The low chime is also the end-of-request sound, so it is not played again at the end of each request — that was why it sounded twice. In wake-word mode the listening session stays open for many commands, so the low chime still only plays that one time, until you stop wake-word mode and start it again. Listening stays open the whole time — 20 seconds one time, 15 seconds after a wake word — so the low chime does not cut you off; you still have plenty of time to speak. The chimes were also levelled so they play at a steadier volume, same length as before. The start bell no longer rings twice when you call Samantha — it rings once when wake-word mode starts, and then Samantha just answers "Yes?" in her own voice.
+When Samantha starts listening — Ctrl+Shift+B or Ctrl+Shift+W — the start of request sound plays once (sounds/start_of_request.wav, one long high C), then the end of request sound plays once (sounds/end_of_request.wav, medium G to medium C). Each one plays once only, and they play separately, never at the same time: the high chime lasts about 5 seconds, so the low chime waits until the high chime has finished, plus a short quiet gap, before it plays. The low chime is also the end-of-request sound, so it is not played again at the end of each request — that was why it sounded twice. In wake-word mode the listening session stays open for many commands, so the low chime still only plays that one time, until you stop wake-word mode and start it again. After a Ctrl+Shift+B turn the microphone only opens once the chimes AND Samantha's own "I'm listening" have finished, so her own voice is never heard back as a command. A B turn lasts 20 seconds; in wake-word mode you have 15 seconds after you say her name — the chimes do not cut you off; you still have plenty of time to speak. The chimes were also levelled so they play at a steadier volume, same length as before. The start bell no longer rings twice when you call Samantha — it rings once when wake-word mode starts, and then Samantha just answers "Yes?" in her own voice.
 
 ## Live TV by Voice
 
@@ -393,7 +411,7 @@ Saying "Samantha, play" in one breath works too — the words after "Samantha" a
 - **Wake Word**: "Samantha"
 - **One-Time Listening Duration**: 20 seconds per activation
 - **Wake Word Command Duration**: 15 seconds after "Samantha" is detected
-- **Pause Grace**: keeps listening for 2.5 seconds after the first words, so a pause does not cut a command off
+- **Pause Grace**: keeps listening for 4 seconds after the first words, so a pause does not cut a command off
 - **Language**: English (US)
 
 ## Coming Soon

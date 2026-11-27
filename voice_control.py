@@ -106,6 +106,37 @@ def _clean_query(query):
     return re.sub(r"\s+", " ", query).strip()
 
 
+def _normalise_heard(text):
+    """Fold the ways Vosk (small model) commonly mishears Ashley
+    back into the words she meant, before any command matching.
+
+    Ashley, 2026-11-27: Samantha kept saying "Excuse me, I didn't
+    understand" for plain commands. Two of them were mishearings
+    the parser never allowed: "list me shows" (Vosk hears "my"
+    as "me") and "list my shows" — the list pattern only allowed
+    "list shows" / "list all shows" / "list the shows", so both
+    fell through to "Excuse me". "doctor hugh / hue / hoo" is
+    Vosk for "doctor who". None of this changes the words she
+    actually said anywhere else: it only runs inside parsing,
+    and only on these small, safe swaps.
+    """
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text.lower().strip())
+    # "list me shows" / "list my shows" -> "list shows".
+    text = re.sub(r"\blist (?:me|my)\b", "list", text)
+    # "least shows" is Vosk for "list shows".
+    text = re.sub(r"\bleast (?:the |all )?(shows?|channels?)\b",
+                  r"list \1", text)
+    # "doctor hugh / hue / hoo" -> "doctor who".
+    text = re.sub(r"\bdoctor (?:hugh|hue|hoo|whoo)\b", "doctor who", text)
+    # Filler at the edges: "please list shows", "list shows please".
+    text = re.sub(r"^please\s+", "", text)
+    text = re.sub(r"\s+please\s*$", "", text)
+    text = re.sub(r"\s+(?:thank you|thanks)\s*$", "", text)
+    return text.strip()
+
+
 def _kind_from_text(text):
     """'movies' when the phrase names a movie/film, otherwise 'shows'."""
     if "movie" in text or "film" in text:
@@ -411,6 +442,10 @@ class VoiceControl:
         # The wake-word path already strips it; this covers the
         # push-button path too.
         text = self._strip_wake_word(text)
+        # Ashley, 2026-11-27: fold Vosk mishearings ("list me
+        # shows", "doctor hugh") back into the words she meant,
+        # before any command matching (see _normalise_heard).
+        text = _normalise_heard(text)
 
         # --- Name: Honey asked 2026-11-23 that Samantha learn her
         # name when she tells it to her, and remember it. Checked
@@ -542,8 +577,24 @@ class VoiceControl:
                 r"|\bwhat can i (?:watch|choose)\b"
                 r"|\bwhat shows? (?:do i have|have i got|are there)"
                 r"|\blist (?:all )?(?:the )?shows?\b"
-                r"|\btell me (?:the )?(?:list of )?(?:shows?|options)\b"
-                r"|\bshow me (?:the )?(?:shows?|options)\b"
+                # Ashley, 2026-11-27: "list me shows" / "list my
+                # shows" is what Vosk hears for "list my shows",
+                # and it fell through to "Excuse me" because the
+                # pattern above only allowed "list shows" /
+                # "list all shows" / "list the shows". _normalise_
+                # heard() already folds "list me/my" to "list",
+                # and this also catches it directly, so either
+                # path works. Same for "what do I have to watch"
+                # and "show me what shows I have", which also
+                # fell through to "Excuse me" before.
+                r"|\blist (?:me|my)\b.*\bshows?\b"
+                r"|\bwhat (?:do i|can i|should i|have i) (?:have to )?watch\b"
+                r"|\bwhat do i have to watch\b"
+                r"|\bshow me (?:what )?(?:shows?|options|choices)\b"
+                r"|\bshow me what shows? (?:i have|do i have)\b"
+                r"|\btell me what shows? (?:i have|do i have)\b"
+                r"|\bwhat shows? (?:can i watch|do you have)\b"
+                r"|\blist (?:what|the) shows? (?:i have|do i have)\b"
                 r"|\bwhat are my shows?\b", text):
             return 'list_shows'
         if re.search(
@@ -659,15 +710,30 @@ class VoiceControl:
             r"^(?:play|watch|switch to|go to)\s+(?:the\s+)?"
             r"(.+?)(?:\s+channel)?\s*$", text)
         if m:
-            name = m.group(1).strip()
+            # Ashley, 2026-11-27: "play Classic Doctor Who
+            # please" used to keep "please" in the name, so
+            # the channel lookup for "classic doctor who
+            # please" found nothing and Samantha said she
+            # does not have it. Clean the name the same way
+            # searches are cleaned (trailing "please" out,
+            # "doctor hugh" back to "doctor who").
+            name = _clean_query(m.group(1))
+            name = _normalise_heard(name)
+            name = re.sub(r"\s+(?:for me|now)\s*$", "", name).strip()
             if name and name not in (
                     "it", "that", "this", "live tv",
                     "live television", "tv", "television",
                     "music", "something", "the"):
                 return ('play_channel', name)
 
-        # Play/Pause commands
-        if any(word in text for word in ['play', 'pause', 'resume', 'stop']):
+        # Play/Pause commands.
+        # Ashley, 2026-11-27: this used to be a substring
+        # test ("play" in text, "stop" in text), so any word
+        # containing them fired it — "playing", "stopped",
+        # "playback", and, worst, words from the show itself
+        # while Samantha was listening during playback, which
+        # paused the show in the middle. Whole words only now.
+        if re.search(r"\b(?:play|pause|resume|stop)\b", text):
             return 'play_pause'
 
         # Channel commands
@@ -686,10 +752,12 @@ class VoiceControl:
         if 'previous folder' in text or 'previous season' in text or 'last folder' in text:
             return 'prev_folder'
 
-        # Seek commands
-        if 'rewind' in text or 'go back' in text or 'back' in text:
+        # Seek commands. "back" used to be a substring test too,
+        # so "playback" / "background" fired rewind; whole words
+        # only now (see the play/pause note above).
+        if re.search(r"\b(?:rewind|back)\b", text) or 'go back' in text:
             return 'rewind'
-        if 'forward' in text or 'skip' in text or 'fast forward' in text:
+        if re.search(r"\b(?:forward|skip|fast forward)\b", text):
             return 'fastforward'
 
         # A bare "download" with no show named: keep the old behaviour
