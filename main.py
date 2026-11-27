@@ -953,7 +953,9 @@ class PlayerFrame(wx.Frame):
         
         if self.player.is_playing:
             self.player.pause()
-            msg = f"Paused: {self.playlist.get_current_file_name()}"
+            msg = ("Paused: "
+                   + self._spoken_episode(
+                       self.playlist.get_current_file_name()))
             self.status_label.SetLabel(msg)
             self._answer_in_samantha_voice(msg)
         else:
@@ -961,12 +963,14 @@ class PlayerFrame(wx.Frame):
             if not self.player.current_file:
                 if self._load_current_file():
                     self.player.play()
-                    msg = f"Playing: {self.playlist.get_current_file_name()}"
+                    msg = self._spoken_playing_msg(
+                        self.playlist.get_current_file_name())
                     self.status_label.SetLabel(msg)
                     self._answer_in_samantha_voice(msg)
             else:
                 self.player.unpause()
-                msg = f"Playing: {self.playlist.get_current_file_name()}"
+                msg = self._spoken_playing_msg(
+                    self.playlist.get_current_file_name())
                 self.status_label.SetLabel(msg)
                 self._answer_in_samantha_voice(msg)
 
@@ -992,16 +996,17 @@ class PlayerFrame(wx.Frame):
             # says "The Big Bang Theory", and no show ever says another
             # show's name.
             channel_name = self.channels.current_channel or ""
-            channel_prefix = f"{channel_name}. " if channel_name else ""
             if not self.player.current_file:
                 if self._load_current_file():
                     self.player.play()
-                    msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
+                    msg = self._spoken_playing_msg(
+                        self.playlist.get_current_file_name(), channel_name)
                     self.status_label.SetLabel(msg)
                     self._answer_in_samantha_voice(msg)
             else:
                 self.player.unpause()
-                msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
+                msg = self._spoken_playing_msg(
+                    self.playlist.get_current_file_name(), channel_name)
                 self.status_label.SetLabel(msg)
                 self._answer_in_samantha_voice(msg)
 
@@ -1072,9 +1077,11 @@ class PlayerFrame(wx.Frame):
             if self.player.is_playing:
                 self.player.play()
             new_name = self.playlist.get_current_file_name()
-            msg = f"Removed {file_name}. Now on: {new_name}"
+            msg = ("Removed " + self._spoken_episode(file_name)
+                   + ". Now on: " + self._spoken_episode(new_name))
         else:
-            msg = f"Removed {file_name}. No more files in this channel."
+            msg = ("Removed " + self._spoken_episode(file_name)
+                   + ". No more files in this channel.")
         self.status_label.SetLabel(msg)
         speak(msg)
 
@@ -1089,7 +1096,10 @@ class PlayerFrame(wx.Frame):
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
             self.logger.log_navigation("NEXT FILE", old_file, new_file)
-            msg = f"Next file: {folder} - {file}"
+            # Spoken name only: the folder is usually the show name
+            # again, so "folder - file" said the show twice, then
+            # the file name with ".mp3" and its S01E02 code.
+            msg = "Next file: " + self._spoken_episode(file)
             self.status_label.SetLabel(msg)
             self._answer_in_samantha_voice(msg)
     
@@ -1104,7 +1114,7 @@ class PlayerFrame(wx.Frame):
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
             self.logger.log_navigation("PREV FILE", old_file, new_file)
-            msg = f"Previous file: {folder} - {file}"
+            msg = "Previous file: " + self._spoken_episode(file)
             self.status_label.SetLabel(msg)
             self._answer_in_samantha_voice(msg)
     
@@ -1119,7 +1129,7 @@ class PlayerFrame(wx.Frame):
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
             self.logger.log_navigation("NEXT FOLDER", old_file, new_file)
-            msg = f"Next folder: {folder} - {file}"
+            msg = "Next folder: " + self._spoken_episode(file)
             self.status_label.SetLabel(msg)
             self._answer_in_samantha_voice(msg)
     
@@ -1134,7 +1144,7 @@ class PlayerFrame(wx.Frame):
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
             self.logger.log_navigation("PREV FOLDER", old_file, new_file)
-            msg = f"Previous folder: {folder} - {file}"
+            msg = "Previous folder: " + self._spoken_episode(file)
             self.status_label.SetLabel(msg)
             self._answer_in_samantha_voice(msg)
     
@@ -1526,10 +1536,14 @@ class PlayerFrame(wx.Frame):
                         except Exception:
                             pass
                         # Say this show's own name when the next file in
-                        # the same channel starts, too.
+                        # the same channel starts, too — in plain words,
+                        # not the file name: no ".mp3", no S01E02 code,
+                        # and the show name once, not once for the
+                        # channel and once for the file.
                         channel_name = self.channels.current_channel or ""
-                        channel_prefix = f"{channel_name}. " if channel_name else ""
-                        msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
+                        now_file = self.playlist.get_current_file_name()
+                        now_show = self._spoken_show(now_file)
+                        msg = self._spoken_playing_msg(now_file, channel_name)
                         self.status_label.SetLabel(msg)
                         speak(msg)
                         # TV guide, automatic: say what comes up
@@ -1537,7 +1551,8 @@ class PlayerFrame(wx.Frame):
                         # what is next without asking.
                         coming = self.playlist.peek_next_file_name()
                         if coming:
-                            speak(f"Coming up next: {coming}")
+                            speak("Coming up next: "
+                                  + self._spoken_episode(coming, now_show))
                         else:
                             nxt_ch = self.channels.peek_next_channel()
                             if nxt_ch:
@@ -1545,8 +1560,8 @@ class PlayerFrame(wx.Frame):
                         # Marathon starting: this file begins three
                         # or more of the same show in a row.
                         if self._marathon_starting():
-                            show = self._show_base(self.playlist.get_current_file_name())
-                            show_name = self.playlist.get_current_file_name().split(" - ")[0].strip()
+                            show_name = self._spoken_show(
+                                self.playlist.get_current_file_name())
                             speak(f"A marathon of {show_name} is starting.")
                         self._save_current_channel_state()
                     else:
@@ -2263,7 +2278,13 @@ class PlayerFrame(wx.Frame):
                 self._switch_to_channel(found)
                 if self.playlist.get_current():
                     self.player.play()
-                    msg = f"You have {found}. Now playing: {found}."
+                    # The channel name, then the episode in plain
+                    # words — not the channel name twice in a row,
+                    # and never the file name with ".mp3" in it.
+                    msg = ("You have " + found + ". Now playing: "
+                           + self._spoken_episode(
+                               self.playlist.get_current_file_name(),
+                               found) + ".")
                 else:
                     msg = f"You have {found}, but there is nothing to play."
             else:
@@ -5443,14 +5464,144 @@ class PlayerFrame(wx.Frame):
             pass
 
     @staticmethod
+    def _spoken_file_base(value):
+        """Bare file name, no folder, no extension, no underscores.
+
+        Ashley, 2026-11-27: the guide was reading full Windows
+        paths out loud — "C colon backslash Users backslash
+        Ashley M backslash audio TV backslash ..." — because
+        show names were taken from full paths. Every spoken
+        name goes through here first, so no path, drive letter,
+        backslash or ".mp3" is ever spoken again.
+        "C:\\Users\\Ashley M\\audio TV\\Friends\\Friends - S01E01.mp3"
+        -> "Friends - S01E01". Both \\ and / count as separators,
+        so this works even when the code runs on another system.
+        """
+        import re
+        name = re.split(r"[\\/]", str(value))[-1].strip()
+        if "." in name:
+            name = name.rsplit(".", 1)[0]
+        name = re.sub(r"\s+", " ", name.replace("_", " ")).strip()
+        return name
+
+    @staticmethod
+    def _parse_spoken_episode(value):
+        """(show, season, episode, title) from a file name or full path.
+
+        "Classic Doctor Who - S01E02 - The Daleks.mp3" ->
+        ("Classic Doctor Who", 1, 2, "The Daleks").
+        "Friends - S01E01.mp3" -> ("Friends", 1, 1, "").
+        "Friends - Season 02 (1994).mp3" -> ("Friends", 2, None, "").
+        "Classic Doctor Who - An Unearthly Child.mp3" ->
+        ("Classic Doctor Who", None, None, "An Unearthly Child").
+        "Friends.mp3" -> ("Friends", None, None, "").
+        The show name is kept as written, so Samantha says it
+        the way Ashley named it.
+        """
+        import re
+        base = PlayerFrame._spoken_file_base(value)
+        parts = [p.strip() for p in base.split(" - ") if p.strip()]
+        if not parts:
+            return ("", None, None, "")
+        show = re.sub(r"\s*\([^)]*\)\s*$", "", parts[0]).strip()
+        season = None
+        episode = None
+        title = ""
+        rest = parts[1:]
+        for i, part in enumerate(rest):
+            m = re.search(r"[Ss](\d+)[Ee](\d+)", part)
+            if m:
+                season = int(m.group(1))
+                episode = int(m.group(2))
+                title = ", ".join(rest[i + 1:]).strip()
+                break
+            m = re.search(r"[Ss]eason\s+(\d+)", part, re.I)
+            if m:
+                season = int(m.group(1))
+                title = ", ".join(rest[i + 1:]).strip()
+                break
+            m = re.search(r"[Ee]pisode\s+(\d+)", part, re.I)
+            if m:
+                episode = int(m.group(1))
+                title = ", ".join(rest[i + 1:]).strip()
+                break
+        else:
+            title = ", ".join(rest).strip()
+        title = re.sub(r"\s*\([^)]*\)\s*$", "", title).strip()
+        return (show, season, episode, title)
+
+    @staticmethod
+    def _spoken_show(value):
+        """Just the show name from a file name or full path.
+
+        "C:\\...\\Classic Doctor Who - S01E01.mp3" ->
+        "Classic Doctor Who". Never a path, never an extension.
+        """
+        return PlayerFrame._parse_spoken_episode(value)[0]
+
+    @staticmethod
+    def _spoken_episode(value, said_show=None):
+        """One episode in plain spoken words: no path, no extension,
+        no file codes like S01E02 or ".mp3".
+
+        "Classic Doctor Who - S01E02 - The Daleks.mp3" ->
+        "Classic Doctor Who, season 1, episode 2, The Daleks".
+        said_show is a show name spoken just before this one:
+        when it is the same show, the name is said once, not
+        twice — "episode 2, The Daleks" instead of repeating
+        "Classic Doctor Who" again.
+        """
+        show, season, episode, title = \
+            PlayerFrame._parse_spoken_episode(value)
+        if not show:
+            return "Unknown show"
+        bits = []
+        if said_show is None or show.lower() != str(said_show).lower():
+            bits.append(show)
+        if season is not None and episode is not None:
+            bits.append(f"season {season}, episode {episode}")
+        elif episode is not None:
+            bits.append(f"episode {episode}")
+        elif season is not None:
+            bits.append(f"season {season}")
+        if title:
+            bits.append(title)
+        return ", ".join(bits)
+
+    @staticmethod
+    def _spoken_playing_msg(file_name, channel_name=""):
+        """'Playing: ...' in plain words, the show name said once.
+
+        "Classic Doctor Who - S01E02 - The Daleks.mp3" on channel
+        "Classic Doctor Who" -> "Playing: Classic Doctor Who,
+        season 1, episode 2, The Daleks" — not "Classic Doctor
+        Who. Playing: Classic Doctor Who - S01E02 - The Daleks.mp3".
+        """
+        show = PlayerFrame._spoken_show(file_name)
+        spoken = PlayerFrame._spoken_episode(file_name)
+        if channel_name and show.lower() == channel_name.lower():
+            return f"Playing: {spoken}"
+        if channel_name:
+            return f"{channel_name}. Playing: {spoken}"
+        return f"Playing: {spoken}"
+
+    @staticmethod
     def _show_base(file_name):
         """The show a file belongs to, for marathon detection.
 
         "Doctor Who - S01E02.mp3" -> "doctor who";
         "Friends - Season 02 (1994).mp3" -> "friends".
+        Works on a full path too: the folder is stripped first.
+        Before this, a full path came back as the whole path
+        ("c:\\users\\ashley m\\audio tv\\classic doctor who\\
+        classic doctor who"), so marathon detection only worked
+        by accident — files in one folder happened to share the
+        same path prefix — and marathon names were spoken as
+        full paths.
         """
         import re
-        base = re.split(r"\s+-\s+|\s*\(|\s+S\d+E\d+", str(file_name), 1)[0].strip().lower()
+        base = PlayerFrame._spoken_file_base(file_name)
+        base = re.split(r"\s+-\s+|\s*\(|\s+S\d+E\d+", base, 1)[0].strip().lower()
         base = re.sub(r"^(?:a|the)\s+", "", base)
         return base
 
@@ -5535,7 +5686,7 @@ class PlayerFrame(wx.Frame):
             return None
         bases = [self._show_base(str(fp.name)) for _, fp in upcoming]
         if len(set(bases)) == 1 and bases[0]:
-            return str(upcoming[0][1].name).split(" - ")[0].strip()
+            return self._spoken_show(str(upcoming[0][1].name))
         return None
 
     def _marathon_starting(self, count=3):
@@ -5650,7 +5801,10 @@ class PlayerFrame(wx.Frame):
             run = names[i:i + count]
             bases = [PlayerFrame._show_base(n) for n in run]
             if len(set(bases)) == 1 and bases[0]:
-                return str(run[0]).split(" - ")[0].strip()
+                # Clean show name only: run[0] can be a full path,
+                # and splitting it on " - " used to return the
+                # whole path, backslashes and all.
+                return PlayerFrame._spoken_show(run[0])
         return None
 
     def _marathons_in_other_channels(self):
@@ -5706,8 +5860,23 @@ class PlayerFrame(wx.Frame):
             return " ".join(parts)
         channel = self.channels.current_channel or ""
         current = self.playlist.get_current_file_name()
+        # said_show tracks the last show name spoken in this guide,
+        # so the same show is never said twice in a row: the next
+        # episode is "episode 2, The Daleks", not
+        # "Classic Doctor Who" all over again. Ashley, 2026-11-27:
+        # the old guide said the channel, then the whole file name
+        # with the show in it again, then ".mp3" and "S01E01".
+        said_show = None
         if channel and current:
-            parts.append(f"Now playing on {channel}: {current}.")
+            show = self._spoken_show(current)
+            if show and show.lower() == channel.lower():
+                parts.append(
+                    f"Now playing {self._spoken_episode(current)}.")
+            else:
+                parts.append(
+                    f"Now playing on {channel}: "
+                    f"{self._spoken_episode(current)}.")
+            said_show = show
         elif channel:
             parts.append(f"Now on {channel}.")
         else:
@@ -5715,9 +5884,12 @@ class PlayerFrame(wx.Frame):
         marathon = self._marathon_ahead()
         if marathon:
             parts.append(f"A marathon of {marathon} is coming up next.")
+            said_show = marathon
         nxt_file = self.playlist.peek_next_file_name()
         if nxt_file:
-            parts.append(f"Coming up next: {nxt_file}.")
+            parts.append(
+                "Coming up next: "
+                f"{self._spoken_episode(nxt_file, said_show)}.")
             nxt_ch = self.channels.peek_next_channel()
             if nxt_ch and nxt_ch != channel:
                 parts.append(f"After that, the next channel is {nxt_ch}.")
@@ -7631,7 +7803,12 @@ class PlayerFrame(wx.Frame):
                 base = self._show_base(fn)
                 if not base:
                     continue
-                display = str(fn).split(" - ")[0].strip()
+                # Clean show name only. fn is a full file path, and
+                # splitting it on " - " used to return the whole
+                # path — "C:\Users\Ashley M\audio TV\Classic
+                # Doctor Who\Classic Doctor Who" — which Samantha
+                # then read out, backslashes and all.
+                display = self._spoken_show(fn)
                 if not display:
                     continue
                 seen[base] = display

@@ -233,6 +233,8 @@ A plain show search does live shows too, as well as AudioVault search and downlo
 
 Samantha reads the whole TV guide: what is playing now, what comes up next in this channel, and what channel comes after this one. She says "Here's what's coming up next!" in her own recorded voice first, then the guide itself is read in the app's usual speaking voice, because Samantha's voice is recordings and she cannot read new show names she never recorded. When one show finishes and the next one starts, she also says what is coming up after that one, without you asking. The guide also names marathons coming up on your other channels, for example a marathon of Classic Doctor Who, Two and a Half Men, Friends, or Frasier, not only a marathon on the channel playing right now. Live TV has no programme schedule, only channel names, so the live guide names the live channel now and the next live channels after it.
 
+The guide only ever says clean show names, in plain words — never a file path, a backslash, a drive letter, or ".mp3", and never a file code like S01E02. For example, while Classic Doctor Who is playing: "Now playing Classic Doctor Who, season 1, episode 1, An Unearthly Child. Coming up next: season 1, episode 2, The Daleks. After that, the next channel is Friends." When the next episode is the same show, she says the show name once, not twice — "episode 2, The Daleks" — and when it is a different show she names it. The same goes for the list of shows, and for "Playing", "Paused", "Next file" and "Coming up next" announcements: only show names and episode numbers in words, never where the file lives on the computer.
+
 | Say This | Action |
 |----------|--------|
 | "what's coming up next" | Read the whole TV guide |
