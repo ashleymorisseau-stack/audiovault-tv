@@ -183,6 +183,15 @@ def _press_nvda_sleep_toggle():
     if os.name != "nt":
         return False
     try:
+        # Ashley, 2026-11-27: NVDA kept saying "pane" all the
+        # time. Clear anything NVDA is already saying first, so
+        # a queued "pane" does not keep repeating after sleep
+        # is supposed to be on.
+        if NVDA_AVAILABLE and nvda:
+            try:
+                nvda.nvdaController_cancelSpeech()
+            except Exception:
+                pass
         user32 = ctypes.windll.user32
         VK_SHIFT = 0x10
         VK_NVDA = _nvda_modifier_vk()
@@ -556,6 +565,10 @@ class PlayerFrame(wx.Frame):
         # window is focused, so it cannot toggle sleep for another app.
         wx.CallLater(500, self._enable_nvda_quiet)
         self.Bind(wx.EVT_ACTIVATE, self._on_activate_nvda_quiet)
+        # Ashley, 2026-11-27: focus starts on the panel, so NVDA
+        # says "pane". Put it in the "Type to Samantha" box
+        # instead, once quiet mode has had a moment to engage.
+        wx.CallLater(1200, self._focus_command_box_if_on_panel)
     
     def _create_ui(self):
         """Create accessible UI with menu bar"""
@@ -709,8 +722,14 @@ class PlayerFrame(wx.Frame):
         
         self.SetMenuBar(menubar)
         
-        # Main panel
+        # Main panel. Ashley, 2026-11-27: NVDA kept saying
+        # "pane" all the time. The panel had no name, so that is
+        # all NVDA had to say when focus landed on it. Give it
+        # the app name, and keep a handle to it so focus can be
+        # moved off it (see _focus_command_box_if_on_panel).
         panel = wx.Panel(self)
+        panel.SetName("Audio Vault TV")
+        self._main_panel = panel
         sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Channel display
@@ -2773,8 +2792,13 @@ class PlayerFrame(wx.Frame):
         # went nowhere and Enter did nothing. Raising the window
         # is enough for the NVDA sleep keypress, which only
         # needs this window to be the active one.
+        # Ashley, 2026-11-27: only raise it when it is not
+        # already active — raising an already-active window
+        # re-announces it, so NVDA said "pane" again for
+        # nothing, every time quiet mode was re-checked.
         try:
-            self.Raise()
+            if not self.IsActive():
+                self.Raise()
         except Exception:
             pass
         wx.CallLater(300, self._press_nvda_quiet_if_focused, _retry)
@@ -2805,12 +2829,42 @@ class PlayerFrame(wx.Frame):
             except Exception:
                 pass
             self.logger.log_playback("NVDA", "Quiet mode on: NVDA sleeps while in AudioVault TV")
+            # Focus was on the unnamed panel, so NVDA said
+            # "pane". Move it to the "Type to Samantha" box
+            # now that NVDA is asleep, so coming back to the
+            # window never lands on the panel again.
+            self._focus_command_box_if_on_panel()
+
+    def _focus_command_box_if_on_panel(self):
+        """Move focus off the main panel, into the text box.
+
+        Ashley, 2026-11-27: NVDA kept saying "pane" all the
+        time, because focus started on — and kept landing back
+        on — the main wx.Panel, which NVDA announces by its
+        role, "pane". The "Type to Samantha" box is a named
+        edit box, so focus there is announced as the box, not
+        "pane", and it is where she types anyway. Only move
+        focus when it is on the panel, the frame, or nowhere:
+        never steal it from a control she is already using,
+        a menu, or a dialog.
+        """
+        try:
+            box = getattr(self, "command_box", None)
+            if box is None:
+                return
+            current = wx.Window.FindFocus()
+            panel = getattr(self, "_main_panel", None)
+            if current is None or current is self or current is panel:
+                box.SetFocus()
+        except Exception:
+            pass
 
     def _on_activate_nvda_quiet(self, event):
         """When the app window becomes the focused one, quiet NVDA if wanted."""
         try:
             if event.GetActive():
                 self._enable_nvda_quiet()
+                self._focus_command_box_if_on_panel()
             event.Skip()
         except Exception:
             pass

@@ -99,7 +99,7 @@ Audio Vault TV does not print "Loading ..." lines any more, because NVDA reads t
 
 ## NVDA Quiet Toggle — Ctrl+Shift+Q
 
-Press Ctrl+Shift+Q in Audio Vault TV to turn NVDA quiet on or off while you are in the app. When NVDA is quiet, you hear Samantha's voice and the shows, not NVDA. When you close the app, NVDA talks again. The menus themselves are still read by NVDA when NVDA is back on, because Samantha's voice is recordings and cannot read new menu names she never recorded — the same limit as the TV guide.
+Press Ctrl+Shift+Q in Audio Vault TV to turn NVDA quiet on or off while you are in the app. When NVDA is quiet, you hear Samantha's voice and the shows, not NVDA. NVDA used to keep saying "pane" all the time, because focus landed on the main panel, which NVDA announces by its role — the panel is now named Audio Vault TV, focus goes to the "Type to Samantha" box instead, the window is only raised when it is not already active, and any queued NVDA speech is cleared before quiet mode is turned on. When you close the app, NVDA talks again. The menus themselves are still read by NVDA when NVDA is back on, because Samantha's voice is recordings and cannot read new menu names she never recorded — the same limit as the TV guide.
 
 Ctrl+Shift+G is not the NVDA toggle — it was already the TV guide key ("What's Coming Up Next"), so it stays the guide. If you press Ctrl+Shift+G you hear the guide, not a toggle.
 
