@@ -361,6 +361,21 @@ class VoiceControl:
                 text):
             return 'can_you_hear_me'
 
+        # --- Reading-voice diagnostic: Ashley, 2026-11-27.
+        # "why is my reading voice not ready" / "what happened
+        # to my reading voice" — Samantha tells her the last
+        # install reason and state, so nobody has to guess.
+        # Checked BEFORE the install check below, or "reading
+        # voice ... ready" in the question would be read as
+        # "install my reading voice".
+        if re.search(
+                r"\bwhy\b.*\breading voice\b"
+                r"|\bwhat happened to my reading voice\b"
+                r"|\bwhat(?:'s|s| is) wrong with (?:my )?reading voice\b"
+                r"|\breading voice\b.*\bnot ready\b",
+                text):
+            return 'reading_voice_status'
+
         # --- Install the reading voice: Ashley, 2026-11-26.
         # "install my reading voice" / "get my reading voice
         # ready" — the one checkable step in the app for the

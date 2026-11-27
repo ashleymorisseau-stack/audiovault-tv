@@ -1,5 +1,24 @@
 import time
 import sys
+import os
+# Ashley, 2026-11-27: the reading voice ships WITH the app, in
+# the vendor/ folder next to main.py, so edge-tts is ready the
+# moment the app opens — no pip install, no internet needed
+# just to have the library, no Command Prompt. vendor/ holds
+# edge-tts 7.3.1 and the pure-Python parts of its dependencies
+# (aiohttp, yarl, multidict, frozenlist, propcache, aiosignal,
+# aiohappyeyeballs, attrs, certifi, tabulate, typing_extensions,
+# edge_playback). The compiled .pyd extensions are deliberately
+# left out: every one of those packages falls back to its
+# pure-Python version when they are missing, so the library
+# still imports and speaks. pip is only a fallback now, for a
+# library that is not vendored. This runs before anything else
+# imports, so `import edge_tts` anywhere in this file finds the
+# vendored copy first.
+_VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "vendor")
+if os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in sys.path:
+    sys.path.insert(0, _VENDOR_DIR)
 # Ashley, 2026-11-26: NO print() at startup. NVDA reads the
 # terminal out loud, so every "Loading ..." line was spoken
 # by NVDA while Audio Vault TV opened, and she does not want
@@ -8,7 +27,6 @@ import sys
 # _show_greeting_dialog, then greets her and names the channels
 # she has, and that is the only loading signal she hears.
 import wx
-import os
 import json
 import threading
 import subprocess
@@ -348,6 +366,16 @@ class PlayerFrame(wx.Frame):
         self._edge_install_fail_count = 0
         self._edge_install_not_ready_said = 0
         self._edge_install_explicit = False
+        # Ashley, 2026-11-27: the plain reason the last try
+        # failed, so she can ask "why is my reading voice not
+        # ready" and be told it instead of us guessing. None
+        # when no try has failed yet. _edge_install_source is
+        # where the working library came from: "vendor" when
+        # it imports from the vendor/ folder shipped with the
+        # app, "pip" when it had to be installed, None while
+        # it is not ready yet.
+        self._edge_install_last_reason = None
+        self._edge_install_source = None
         self._pending_reading_text = None
         self._edge_install_retry_timer = None
         self._edge_install_started_announced = False
@@ -463,12 +491,21 @@ class PlayerFrame(wx.Frame):
         # Defer slow operations until after window shows
         wx.CallAfter(self._vault_auto_login)
         
-        # Show greeting dialog after a short delay
-        wx.CallLater(1000, self._show_greeting_dialog)
+        # Show greeting dialog after a short delay. Ashley,
+        # 2026-11-27: 2.5 seconds, not 1 — the reading-voice
+        # install thread starts at the top of __init__, but the
+        # greeting clip is only about 5 seconds and she answers
+        # it right away, so the voice was still "not ready" on
+        # her very first ask. The extra time lets the vendored
+        # library (which imports in well under a second) be
+        # confirmed ready before she is asked anything, and
+        # listening still only starts after the greeting
+        # finishes, so her answer is never lost.
+        wx.CallLater(2500, self._show_greeting_dialog)
 
         # Ashley, 2026-11-26: quiet NVDA shortly after the window
         # opens, so it stops talking while she is in the app. Samantha
-        # still greets her in her own voice at 1000 ms — that plays
+        # still greets her in her own voice at 2500 ms — that plays
         # through pygame, not NVDA, so quiet mode does not silence it.
         # If the window is not focused yet when this runs, the enable
         # keeps trying every 2 seconds, and coming back to the window
@@ -826,14 +863,14 @@ class PlayerFrame(wx.Frame):
             self._update_title()
             msg = "Live TV paused"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
             return
 
         # Stopped, but live TV was the last thing playing -> resume it (re-tune)
         if getattr(self, "_livetv_last_channel", None):
             ch = self._livetv_last_channel
             self.logger.log_playback("LIVETV", "Space pressed -> resuming last live channel")
-            speak("Resuming live TV")
+            self._answer_in_samantha_voice("Resuming live TV")
             self._livetv_play(ch)
             return
 
@@ -846,14 +883,14 @@ class PlayerFrame(wx.Frame):
                 return
             msg = "No files loaded. Use Ctrl+O to select folders."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
             return
         
         if self.player.is_playing:
             self.player.pause()
             msg = f"Paused: {self.playlist.get_current_file_name()}"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
         else:
             # If no file loaded yet, load it first
             if not self.player.current_file:
@@ -861,12 +898,12 @@ class PlayerFrame(wx.Frame):
                     self.player.play()
                     msg = f"Playing: {self.playlist.get_current_file_name()}"
                     self.status_label.SetLabel(msg)
-                    speak(msg)
+                    self._answer_in_samantha_voice(msg)
             else:
                 self.player.unpause()
                 msg = f"Playing: {self.playlist.get_current_file_name()}"
                 self.status_label.SetLabel(msg)
-                speak(msg)
+                self._answer_in_samantha_voice(msg)
 
     def _start_playback(self):
         """Stop any live stream and start/resume local MP3 playback.
@@ -896,12 +933,12 @@ class PlayerFrame(wx.Frame):
                     self.player.play()
                     msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
                     self.status_label.SetLabel(msg)
-                    speak(msg)
+                    self._answer_in_samantha_voice(msg)
             else:
                 self.player.unpause()
                 msg = f"{channel_prefix}Playing: {self.playlist.get_current_file_name()}"
                 self.status_label.SetLabel(msg)
-                speak(msg)
+                self._answer_in_samantha_voice(msg)
 
     def _on_delete_current_file(self, event=None):
         """Delete the currently-loaded file from disk and remove it from the
@@ -990,7 +1027,7 @@ class PlayerFrame(wx.Frame):
             self.logger.log_navigation("NEXT FILE", old_file, new_file)
             msg = f"Next file: {folder} - {file}"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
     
     def _prev_file(self):
         """Go to previous file"""
@@ -1005,7 +1042,7 @@ class PlayerFrame(wx.Frame):
             self.logger.log_navigation("PREV FILE", old_file, new_file)
             msg = f"Previous file: {folder} - {file}"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
     
     def _next_folder(self):
         """Go to next folder"""
@@ -1020,7 +1057,7 @@ class PlayerFrame(wx.Frame):
             self.logger.log_navigation("NEXT FOLDER", old_file, new_file)
             msg = f"Next folder: {folder} - {file}"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
     
     def _prev_folder(self):
         """Go to previous folder"""
@@ -1035,7 +1072,7 @@ class PlayerFrame(wx.Frame):
             self.logger.log_navigation("PREV FOLDER", old_file, new_file)
             msg = f"Previous folder: {folder} - {file}"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
     
     def _rewind(self):
         """Rewind 10 seconds"""
@@ -1045,7 +1082,7 @@ class PlayerFrame(wx.Frame):
         seconds = int(pos % 60)
         msg = f"Rewind to {minutes}:{seconds:02d}"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
     
     def _fastforward(self):
         """Fast forward 10 seconds"""
@@ -1055,7 +1092,7 @@ class PlayerFrame(wx.Frame):
         seconds = int(pos % 60)
         msg = f"Fast forward to {minutes}:{seconds:02d}"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
     
     def _on_clear_all(self, event):
         """Clear all folders and stop playback"""
@@ -1277,7 +1314,7 @@ class PlayerFrame(wx.Frame):
         else:
             msg = "No channels available"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
     
     def _prev_channel(self):
         """Switch to previous channel"""
@@ -1288,7 +1325,7 @@ class PlayerFrame(wx.Frame):
         else:
             msg = "No channels available"
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
     
     def _switch_to_channel(self, channel_name, start_from_beginning=False):
         """Switch to a specific channel"""
@@ -1325,7 +1362,7 @@ class PlayerFrame(wx.Frame):
             self._update_title()
             msg = f"Channel: {channel_name}"
             self.status_label.SetLabel(f"Switched to channel: {channel_name}")
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
         self.timer.Start(100)
     
     def _on_timer(self, event):
@@ -1665,7 +1702,9 @@ class PlayerFrame(wx.Frame):
         text-enter event, so the key handler is the belt to
         this one's braces. Either way the command runs once:
         the box is cleared before it runs, and a repeat of the
-        same words within a second is ignored.
+        same words within a second is ignored. The box keeps
+        focus after Enter, so she can type the next command
+        straight away.
         """
         text = self.command_box.GetValue().strip()
         if not text:
@@ -1679,6 +1718,17 @@ class PlayerFrame(wx.Frame):
         self.command_box.SetValue("")
         self.status_label.SetLabel(f"You typed: {text}")
         self._run_typed_command(text)
+        # Ashley, 2026-11-27: the box keeps focus after Enter,
+        # so she can type the next command straight away without
+        # having to find the box again. Focus is returned here,
+        # after the command runs — and _enable_nvda_quiet never
+        # steals it in the first place (it only Raises the
+        # window, never SetFocus). Guarded: a box that cannot
+        # take focus must not break the command that just ran.
+        try:
+            self.command_box.SetFocus()
+        except Exception:
+            pass
 
     def _on_command_box_key(self, event):
         """Enter pressed in the Type to Samantha box (key event).
@@ -1878,6 +1928,14 @@ class PlayerFrame(wx.Frame):
             # it is all ready (see _on_install_requirements).
             self._on_install_requirements()
             return
+        elif command == 'reading_voice_status':
+            # Ashley, 2026-11-27: "why is my reading voice not
+            # ready" / "what happened to my reading voice" —
+            # Samantha tells her the last install reason and
+            # state, in her own voice, so nobody has to guess
+            # next time (see _say_reading_voice_status).
+            self._say_reading_voice_status()
+            return
         elif command == 'list_channels':
             # "Samantha, list all the channels I have" — read
             # them out, without opening the channel picker.
@@ -1955,32 +2013,35 @@ class PlayerFrame(wx.Frame):
                 lambda: self._say_in_samantha_voice(msg))
             return
         elif command == 'play_pause':
+            # The helper announces itself in Samantha's voice
+            # now (see _toggle_play_pause) — no extra "Command
+            # recognized" over it.
             self._toggle_play_pause()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'next_file':
             self._next_file()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'prev_file':
             self._prev_file()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'next_folder':
             self._next_folder()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'prev_folder':
             self._prev_folder()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'next_channel':
             self._next_channel()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'prev_channel':
             self._prev_channel()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'rewind':
             self._rewind()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'fastforward':
             self._fastforward()
-            msg = f"Command recognized: {text}"
+            return
         elif command == 'search_movies':
             # Honey, 2026-11-23 evening: "search for Young Sheldon
             # and that is it" - a voice search downloads the show
@@ -2110,7 +2171,11 @@ class PlayerFrame(wx.Frame):
         self._wake_chimes_played = False
         msg = f"Voice error: {error}"
         self.status_label.SetLabel(msg)
-        speak(msg)
+        # Ashley, 2026-11-27: even an error is answered in
+        # Samantha's voice, never NVDA — the "Excuse me" clip
+        # fits (she could not be heard), and the exact error
+        # stays on the status line and in the log.
+        self._answer_in_samantha_voice(msg, "samantha_excuse_me.wav")
     
     def _toggle_wake_word_mode(self, event=None):
         """Toggle wake word listening mode"""
@@ -2835,9 +2900,27 @@ class PlayerFrame(wx.Frame):
         ready yet, she hears a short recorded clip instead of
         silence — "I'm on it" for an action that was done, or the
         clip the caller names (for example "Excuse me" when she
-        was not understood, or the "reading voice isn't ready"
-        clip when the answer itself is a list or an error she
-        needs the words of). Never NVDA, never Microsoft.
+        was not understood). Never NVDA, never Microsoft.
+
+        Ashley, 2026-11-27: the fallback clip used to be
+        "samantha_reading_not_ready.wav" for about thirty
+        answers — every list, search, and download result.
+        That clip says the reading voice is not ready, so the
+        moment the startup install failed fast (pip failing in
+        seconds — no internet, pip in another Python), her
+        very first ask, "Doctor Who", answered with "not
+        ready" even though the app was about to retry by
+        itself in a minute. A caller may still pass that clip
+        for the one case where it is true (the reading voice
+        really did fail), but it is NEVER played here while
+        the install is still running or has never been tried:
+        then the answer is "I'm on it" and the words are kept
+        as a pending reading, to be read when the voice is
+        ready (see _say_in_samantha_voice). When a try has
+        really failed, the failure itself already said "not
+        ready" once (see _on_edge_install_failed), so this
+        answers "I'm on it" too and the retry reads the words
+        — she is never told "not ready" twice for one ask.
         """
         try:
             self.status_label.SetLabel(text)
@@ -2845,8 +2928,32 @@ class PlayerFrame(wx.Frame):
             pass
         if self._samantha_voice_mode() == "edge":
             self._say_in_samantha_voice(text)
-        else:
-            self._queue_samantha_sound(fallback_clip)
+            return
+        if fallback_clip == "samantha_reading_not_ready.wav":
+            state = getattr(self, "_edge_install_state", "unknown")
+            if state in ("installing", "checking") or (
+                    state == "unknown"
+                    and getattr(self, "_edge_install_running", False)):
+                # Nothing has failed — the voice is still on
+                # its way. Say "I'm on it", keep the words,
+                # read them when it is ready.
+                self._pending_reading_text = text
+                self._queue_samantha_sound(
+                    "samantha_im_on_it.wav",
+                    after=self._clear_samantha_reading)
+                return
+            if state == "failed":
+                # A try really did fail. The failure already
+                # said "not ready" once; do not say it again
+                # for this same ask. Keep the words for the
+                # retry instead, and say "I'm on it" so she
+                # knows she was heard.
+                self._pending_reading_text = text
+                self._queue_samantha_sound(
+                    "samantha_im_on_it.wav",
+                    after=self._clear_samantha_reading)
+                return
+        self._queue_samantha_sound(fallback_clip)
 
     def _play_wake_chimes(self):
         """Wake chimes: high chime once, then low chime once.
@@ -5508,7 +5615,22 @@ class PlayerFrame(wx.Frame):
         # No reading voice yet. Never NVDA, never Microsoft.
         self._samantha_reading = True
         state = getattr(self, "_edge_install_state", "unknown")
-        if state in ("installing", "checking"):
+        if state in ("installing", "checking") or (
+                state == "unknown"
+                and getattr(self, "_edge_install_running", False)):
+            # Ashley, 2026-11-27: the install thread starts in
+            # __init__ but the state is still "unknown" for the
+            # first moment — it only becomes "installing" once
+            # the thread runs. An ask in that moment used to
+            # fall through to the "not ready" clip below, even
+            # though nothing had failed yet: that is what she
+            # heard on her first ask after opening the app.
+            # While ANY install is running, whatever the state
+            # says, remember what she asked for and read it
+            # when the voice is ready (see
+            # _on_edge_install_ready), instead of saying "not
+            # ready" for something that is about to be ready.
+            # "I'm on it" tells her Samantha heard her.
             # The install is already running — she asked in the
             # middle of it. Remember what she asked for and read
             # it when the voice is ready (see
@@ -5533,10 +5655,15 @@ class PlayerFrame(wx.Frame):
                 "samantha_im_on_it.wav",
                 after=self._clear_samantha_reading)
             return
-        # A try just failed, very recently: say so once for that
-        # failure, in her own recorded voice, and then stay quiet
-        # until the next try.
-        if (getattr(self, "_edge_install_not_ready_said", 0)
+        # A try just failed, very recently: say so once for
+        # that failure, in her own recorded voice, and then
+        # stay quiet until the next try. Only a real failed
+        # try says "not ready" — never "unknown" (no try has
+        # run yet) and never while an install is still
+        # running: those are covered above, and saying "not
+        # ready" for them is the bug Ashley heard on open.
+        if state == "failed" and (
+                getattr(self, "_edge_install_not_ready_said", 0)
                 != getattr(self, "_edge_install_fail_count", 0)):
             self._edge_install_not_ready_said = \
                 self._edge_install_fail_count
@@ -5871,8 +5998,45 @@ class PlayerFrame(wx.Frame):
         threading.Thread(target=self._ensure_edge_tts,
                          daemon=True).start()
 
+    def _edge_tts_is_vendored(self):
+        """True when edge-tts imports from the vendor/ folder
+        shipped with the app (not from a pip install).
+
+        Ashley, 2026-11-27: the reading voice ships in the
+        app folder now, so on a normal open it is already
+        there. This tells the diagnostic (see
+        _say_reading_voice_status) and the log which copy is
+        in use, so a vendored library is never mistaken for a
+        failed pip install.
+        """
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec("edge_tts")
+        except Exception:
+            return False
+        if spec is None or not getattr(spec, "origin", None):
+            return False
+        vendor = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "vendor")
+        try:
+            return os.path.abspath(spec.origin).startswith(
+                os.path.abspath(vendor) + os.sep)
+        except Exception:
+            return False
+
     def _ensure_edge_tts(self, force=False):
         """Get Samantha's reading voice ready, in the background.
+
+        Ashley, 2026-11-27: the reading voice now ships WITH
+        the app in the vendor/ folder (see the top of this
+        file), so on a normal open the library already imports
+        and nothing is installed at all — the first check below
+        finds it and marks the voice ready at once. pip is only
+        a fallback for a computer where vendor/ is missing.
+        The last failure's plain reason is kept in
+        _edge_install_last_reason, so Ashley can ask "why is
+        my reading voice not ready" and be told it (see
+        _say_reading_voice_status) instead of us guessing.
 
         Ashley, 2026-11-26: she kept hearing "My reading voice
         isn't ready yet" instead of the list, and she does not
@@ -5925,6 +6089,12 @@ class PlayerFrame(wx.Frame):
             if self._edge_import_ok():
                 self._edge_install_state = "ready"
                 self._samantha_voice_mode_cache = "edge"
+                # Vendored (shipped with the app) or pip: the
+                # diagnostic says which, and a past failure's
+                # reason is cleared now the voice is ready.
+                self._edge_install_source = (
+                    "vendor" if self._edge_tts_is_vendored() else "pip")
+                self._edge_install_last_reason = None
                 self._write_edge_flag(True)
                 wx.CallAfter(self._on_edge_install_ready)
                 return
@@ -5944,12 +6114,18 @@ class PlayerFrame(wx.Frame):
             if pip_ok and self._edge_import_ok(force_recheck=True):
                 self._edge_install_state = "ready"
                 self._samantha_voice_mode_cache = "edge"
+                self._edge_install_source = "pip"
+                self._edge_install_last_reason = None
                 self._edge_install_started_announced = False
                 self._write_edge_flag(True)
                 wx.CallAfter(self._on_edge_install_ready)
                 return
             self._edge_install_state = "failed"
             self._edge_install_started_announced = False
+            # Keep the plain reason for this failure, so
+            # "why is my reading voice not ready" can say it.
+            self._edge_install_last_reason = \
+                self._plain_install_reason(pip_tail)
             self._edge_install_fail_count = \
                 getattr(self, "_edge_install_fail_count", 0) + 1
             self._write_edge_flag(False)
@@ -5976,6 +6152,8 @@ class PlayerFrame(wx.Frame):
                 self._edge_install_state = "failed"
                 self._edge_install_fail_count = \
                     getattr(self, "_edge_install_fail_count", 0) + 1
+                self._edge_install_last_reason = \
+                    "the install ran into a problem before it could finish"
                 try:
                     self._write_edge_flag(False)
                 except Exception:
@@ -6070,6 +6248,94 @@ class PlayerFrame(wx.Frame):
             self._play_samantha_sequence(
                 ["samantha_reading_not_ready.wav"],
                 after=self._clear_samantha_reading)
+
+    def _say_reading_voice_status(self):
+        """Say why the reading voice is or is not ready.
+
+        Ashley, 2026-11-27: "why is my reading voice not
+        ready" / "what happened to my reading voice". She
+        kept hearing "not ready" with no reason, and nobody
+        could tell her why without guessing. This is the
+        checkable diagnostic: it reports the last install
+        state and the plain reason for the last failure, in
+        her own voice when the reading voice is up — and the
+        full pip error tail is always in the app log
+        (mp3_player_log.txt, "EDGE-TTS install failed: ..." /
+        "REQUIREMENTS install failed: ..."). Never NVDA,
+        never Microsoft, no new voice files.
+        Honest limit: when the reading voice itself is down,
+        there is no voice that can speak the reason out loud
+        — Samantha's recorded clips cannot say words she
+        never recorded. Then she hears the "not ready" clip
+        once (it is the only voice available) and the plain
+        reason is on the status line and in the log, so it can
+        be read back to her. When the voice is up, she hears
+        the whole reason spoken.
+        """
+        state = getattr(self, "_edge_install_state", "unknown")
+        reason = getattr(self, "_edge_install_last_reason", None)
+        req_reasons = getattr(self, "_requirements_last_reason", {}) or {}
+        if self._samantha_voice_mode() == "edge":
+            if state == "ready":
+                source = getattr(self, "_edge_install_source", None)
+                where = ("shipped with the app" if source == "vendor"
+                         else "installed on this computer")
+                text = ("My reading voice is ready now. It is "
+                        + where + ". Ask me to list your shows.")
+            elif state in ("installing", "checking") or (
+                    state == "unknown"
+                    and getattr(self, "_edge_install_running", False)):
+                text = ("I am still getting my reading voice ready. "
+                        "Give me a moment, then ask me again.")
+            else:
+                bits = []
+                if reason:
+                    bits.append(reason)
+                for _name, r in sorted(req_reasons.items()):
+                    if r:
+                        bits.append(r)
+                why = (" " + " ".join(bits)) if bits else ""
+                text = ("My reading voice is not ready." + why
+                        + " I will try again by myself in a minute."
+                        " You can also say, install everything I need.")
+            self._say_in_samantha_voice(text)
+            return
+        # The reading voice is down, so the reason cannot be
+        # spoken — but it is still shown and logged, and the
+        # "not ready" clip is said once, not on every ask.
+        bits = []
+        if reason:
+            bits.append(reason)
+        for _name, r in sorted(req_reasons.items()):
+            if r:
+                bits.append(r)
+        why = (" " + " ".join(bits)) if bits else ""
+        msg = "My reading voice is not ready." + why
+        try:
+            self.status_label.SetLabel(msg)
+        except Exception:
+            pass
+        try:
+            self.logger.log_error("READING VOICE STATUS: " + msg)
+        except Exception:
+            pass
+        if state == "failed":
+            # A try really failed: the "not ready" clip, once
+            # for that failure (see _say_in_samantha_voice).
+            self._say_in_samantha_voice(msg)
+            return
+        # Still on its way, or never tried yet: "I'm on it".
+        # The status words are NOT kept as a pending reading
+        # — they say "not ready", and would be wrong by the
+        # time the voice is ready and reads them.
+        self._samantha_reading = True
+        self._queue_samantha_sound(
+            "samantha_im_on_it.wav",
+            after=self._clear_samantha_reading)
+        if state == "unknown" and not getattr(
+                self, "_edge_install_running", False):
+            threading.Thread(target=self._ensure_edge_tts,
+                             daemon=True).start()
 
     def _on_install_reading_voice(self, event=None):
         """Menu / voice: get Samantha's reading voice ready.
@@ -6694,7 +6960,7 @@ class PlayerFrame(wx.Frame):
         if not LIVETV_AVAILABLE:
             msg = "Live TV is not available. No shows are available to play."
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
             self.logger.log_error(f"LIVETV-FALLBACK: {reason} but Live TV not available")
             return False
         if getattr(self, "livetv_process", None):
@@ -6704,7 +6970,7 @@ class PlayerFrame(wx.Frame):
         self._livetv_fallback_in_progress = True
         msg = "No shows are available. Playing live TV instead. Live TV does not need your external drive."
         self.status_label.SetLabel(msg)
-        speak(msg)
+        self._answer_in_samantha_voice(msg)
         self.logger.log_playback("LIVETV-FALLBACK", reason)
         threading.Thread(target=self._livetv_fallback_thread, daemon=True).start()
         return True
@@ -6727,7 +6993,7 @@ class PlayerFrame(wx.Frame):
             if error:
                 self.logger.log_error(f"LIVETV-FALLBACK failed: {error}")
             self.status_label.SetLabel(msg)
-            speak(msg)
+            self._answer_in_samantha_voice(msg)
             return
         # _livetv_play speaks "Tuning in to ..." and starts the stream.
         self._livetv_play(channel)
