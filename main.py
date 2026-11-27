@@ -39,11 +39,11 @@ try:
     from audio_player import AudioPlayer
     AUDIO_PLAYER_AVAILABLE = True
 except ImportError:
-    # pygame (which audio_player needs) is not installed yet:
-    # the app still opens, and the requirements install below
-    # gets pygame and then loads AudioPlayer (see
-    # _reload_missing_modules), instead of the whole app
-    # refusing to start over one missing library.
+    # soundfile / sounddevice (which audio_player needs) are
+    # not installed yet: the app still opens, and the
+    # requirements install below gets them and then loads
+    # AudioPlayer (see _reload_missing_modules), instead of
+    # the whole app refusing to start over one missing library.
     AudioPlayer = None
     AUDIO_PLAYER_AVAILABLE = False
 from playlist_manager import PlaylistManager
@@ -103,7 +103,7 @@ def speak(text):
     # Ashley, 2026-11-26: while NVDA quiet mode is on, nothing is
     # spoken through NVDA at all — not even the app's own messages.
     # Samantha's recorded voice and the shows still play, because
-    # they go through pygame, not NVDA.
+    # they go through the audio engine, not NVDA.
     if _NVDA_QUIET:
         return
     if NVDA_AVAILABLE and nvda:
@@ -289,7 +289,7 @@ _REQUIRED_LIBRARIES = (
     ("edge_tts", "edge-tts", "the reading voice", True),
     ("vosk", "vosk", "voice listening", True),
     ("sounddevice", "sounddevice", "the microphone", True),
-    ("pygame", "pygame", "sound playing", True),
+    ("soundfile", "soundfile", "sound playing", True),
     ("requests", "requests", "getting shows", True),
     ("bs4", "beautifulsoup4", "reading show pages", True),
     ("yt_dlp", "yt-dlp", "YouTube downloads", True),
@@ -322,10 +322,10 @@ class PlayerFrame(wx.Frame):
         # Initialize logger
         self.logger = PlayerLogger(Path.home() / "mp3_player_log.txt")
         
-        # AudioPlayer is None when pygame is not installed yet
-        # (see the guarded import at the top): playback stays
-        # off until the requirements install gets it, instead
-        # of the app refusing to start.
+        # AudioPlayer is None when the audio libraries are not
+        # installed yet (see the guarded import at the top):
+        # playback stays off until the requirements install
+        # gets them, instead of the app refusing to start.
         try:
             self.player = AudioPlayer() if AudioPlayer is not None else None
         except Exception:
@@ -465,10 +465,9 @@ class PlayerFrame(wx.Frame):
         # and the low chime is not repeated at the end.
         self._wake_chimes_played = False
         # Samantha's voice, one clip at a time (Ashley,
-        # 2026-11-26): a dedicated pygame channel, a queue for
+        # 2026-11-26): a dedicated clip player, a queue for
         # sequences, and the install state for her reading voice
-        # — see _samantha_channel and _ensure_edge_tts.
-        self._samantha_channel_obj = None
+        # — see audio_player.ClipPlayer and _ensure_edge_tts.
         self._samantha_queue = []
         self._samantha_pump_timer = None
         self._pending_voice_command_timer = None
@@ -550,7 +549,7 @@ class PlayerFrame(wx.Frame):
         # Ashley, 2026-11-26: quiet NVDA shortly after the window
         # opens, so it stops talking while she is in the app. Samantha
         # still greets her in her own voice at 2500 ms — that plays
-        # through pygame, not NVDA, so quiet mode does not silence it.
+        # through the audio engine, not NVDA, so quiet mode does not silence it.
         # If the window is not focused yet when this runs, the enable
         # keeps trying every 2 seconds, and coming back to the window
         # tries again too — the key is only ever pressed while this
@@ -1029,14 +1028,13 @@ class PlayerFrame(wx.Frame):
         if result != wx.YES:
             return
 
-        # Stop playback and release the file so Windows lets us delete it
+        # Stop playback and release the file so the OS lets us delete it
         try:
             self.player.stop()
             self.player.is_playing = False
             self.player.current_file = None
             try:
-                import pygame
-                pygame.mixer.music.unload()
+                self.player.unload()
             except Exception:
                 pass
         except Exception:
@@ -1448,17 +1446,17 @@ class PlayerFrame(wx.Frame):
                 # counting here at all: no 1-tick and no 3-tick
                 # check, nothing that guesses "finished" from the
                 # mixer being quiet for a moment. A file only
-                # advances when pygame itself says it really
-                # ended, in one of two ways:
-                #   1. The music-end event: pygame posts it when
-                #      a track finishes (see AudioPlayer.
-                #      music_ended()). A momentary mixer hiccup
+                # advances when the audio engine itself says it
+                # really ended, in one of two ways:
+                #   1. The end-of-file signal: the stream posts
+                #      it when a track finishes (see AudioPlayer.
+                #      music_ended()). A momentary dropout
                 #      or a quiet passage mid-file never posts
                 #      it, so it can never cut a show off early.
-                #   2. Backup, only if the end event never
-                #      arrives: pygame says the music is not
-                #      playing at all (position -1) AND the
-                #      mixer is not busy AND we were well into
+                #   2. Backup, only if the end signal never
+                #      arrives: the engine says the music is not
+                #      playing at all (position -1) AND nothing
+                #      is busy AND we were well into
                 #      the file (past 5 seconds in). The first
                 #      moments after pressing play can never
                 #      look like an ending, and a single
@@ -1841,10 +1839,7 @@ class PlayerFrame(wx.Frame):
             return
         _busy = bool(getattr(self, "_samantha_reading", False))
         if not _busy:
-            try:
-                _busy = bool(self._samantha_channel().get_busy())
-            except Exception:
-                _busy = False
+            _busy = self._samantha_busy()
         if _busy and _waited_ms < 15000:
             wx.CallLater(500, self._begin_listen_thread,
                          _waited_ms + 500)
@@ -3018,56 +3013,39 @@ class PlayerFrame(wx.Frame):
         if not self._sounds_enabled():
             return
         startup_file = Path(__file__).parent / "sounds" / "startup.mp3"
-        if startup_file.exists():
+        if startup_file.exists() and self.player is not None:
             try:
-                import pygame
-                pygame.mixer.init()
-                pygame.mixer.music.load(str(startup_file))
-                pygame.mixer.music.play()
+                self.player.load(str(startup_file))
+                self.player.play()
             except Exception as e:
                 print(f"Could not play startup sound: {e}")
-    
-    def _samantha_channel(self):
-        """The one pygame channel Samantha's voice uses.
 
-        Ashley, 2026-11-26: Samantha's clips kept overlapping
-        each other, because every _play_sound_effect did a fresh
-        pygame.mixer.init() and Sound.play(), and pygame hands
-        each fresh Sound a different free channel. Now every
-        Samantha clip — recordings, chimes, readings — plays on
-        this one channel, and a new clip stops the old one first
-        (see _play_sound_effect), so she is only ever one voice
-        at a time. Shows keep playing: they use
-        pygame.mixer.music, never this channel, so stopping it
-        never stops a show.
+    def _samantha_busy(self):
+        """True while one of Samantha's clips is still playing.
+
+        Shows are never counted: they play through the
+        AudioPlayer music stream, clips through the separate
+        clip player (see audio_player.ClipPlayer), so a show
+        playing in the background never makes this say "busy".
         """
-        if getattr(self, "_samantha_channel_obj", None) is not None:
-            return self._samantha_channel_obj
-        import pygame
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        self._samantha_channel_obj = pygame.mixer.Channel(0)
-        return self._samantha_channel_obj
+        try:
+            from audio_player import clip_player
+            return clip_player().busy()
+        except Exception:
+            return False
 
     def _clip_ms(self, path):
         """Length of a sound file in milliseconds.
 
-        Read from the wav header when it has one; otherwise ask
-        pygame for the length. Used so a next clip (or listening)
-        is scheduled after this clip actually finishes, instead
-        of a fixed guess that overlaps or cuts it off.
+        Read from the file's header info. Used so a next clip
+        (or listening) is scheduled after this clip actually
+        finishes, instead of a fixed guess that overlaps or
+        cuts it off.
         """
         try:
-            import wave
-            with wave.open(str(path), "rb") as w:
-                return int(w.getnframes() / float(w.getframerate()) * 1000)
-        except Exception:
-            pass
-        try:
-            import pygame
-            if not pygame.mixer.get_init():
-                pygame.mixer.init()
-            return int(pygame.mixer.Sound(str(path)).get_length() * 1000)
+            import soundfile as sf
+            info = sf.info(str(path))
+            return int(info.frames / float(info.samplerate) * 1000)
         except Exception:
             return 2000
 
@@ -3077,13 +3055,13 @@ class PlayerFrame(wx.Frame):
         Ashley, 2026-11-26: clips were overlapping, because a
         fresh Sound played on a fresh channel every time and
         nothing ever stopped the previous clip. Now the clip
-        plays on Samantha's one dedicated channel
-        (see _samantha_channel), and that channel is stopped
-        first, so a new clip cuts the old one off instead of
-        talking over it. Any queued sequence (wake chimes,
+        plays on Samantha's one dedicated clip player
+        (see audio_player.ClipPlayer), which stops the old
+        clip first, so a new clip cuts the old one off instead
+        of talking over it. Any queued sequence (wake chimes,
         greeting) is cancelled too — it belonged to the turn
         this clip interrupts. Shows are untouched: they play
-        through pygame.mixer.music, not this channel.
+        through the AudioPlayer music stream, not the clips.
         Returns the clip length in milliseconds, so callers can
         schedule what comes next after it finishes.
         """
@@ -3092,11 +3070,8 @@ class PlayerFrame(wx.Frame):
             return 0
         self._cancel_samantha_queue()
         try:
-            import pygame
-            channel = self._samantha_channel()
-            channel.stop()
-            sound = pygame.mixer.Sound(str(sound_file))
-            channel.play(sound)
+            from audio_player import clip_player
+            clip_player().play_file(str(sound_file))
             return self._clip_ms(sound_file)
         except Exception as e:
             print(f"Could not play sound effect {filename}: {e}")
@@ -3170,14 +3145,10 @@ class PlayerFrame(wx.Frame):
         self._samantha_pump_timer = None
         if not getattr(self, "_samantha_queue", None):
             return
-        try:
-            channel = self._samantha_channel()
-            if channel.get_busy():
-                self._samantha_pump_timer = wx.CallLater(
-                    200, self._pump_samantha_queue)
-                return
-        except Exception:
-            pass
+        if self._samantha_busy():
+            self._samantha_pump_timer = wx.CallLater(
+                200, self._pump_samantha_queue)
+            return
         path, after = self._samantha_queue.pop(0)
         if path is None:
             if after is not None:
@@ -3189,10 +3160,8 @@ class PlayerFrame(wx.Frame):
             return
         ms = 0
         try:
-            import pygame
-            channel = self._samantha_channel()
-            sound = pygame.mixer.Sound(path)
-            channel.play(sound)
+            from audio_player import clip_player
+            clip_player().play_file(str(path))
             ms = self._clip_ms(path)
         except Exception as e:
             print(f"Could not play queued sound {path}: {e}")
@@ -6037,10 +6006,7 @@ class PlayerFrame(wx.Frame):
             # a show playing in the background no longer holds
             # a reading back at all.
             for _ in range(40):
-                try:
-                    if not self._samantha_channel().get_busy():
-                        break
-                except Exception:
+                if not self._samantha_busy():
                     break
                 time.sleep(0.2)
             words = len(str(text).split())
@@ -7604,19 +7570,16 @@ class PlayerFrame(wx.Frame):
         time. Now it plays on Samantha's one dedicated channel,
         and waits until that channel is free — up to about 12
         seconds — instead of starting over a clip. Shows keep
-        playing: they use mixer.music, not this channel.
+        playing: they use the AudioPlayer music stream, not the clips.
         """
         try:
-            import pygame
-            channel = self._samantha_channel()
-            if channel.get_busy():
+            from audio_player import clip_player
+            if clip_player().busy():
                 if _retry < 40:
                     wx.CallLater(300, self._play_dynamic_wav,
                                  path, words, _retry + 1)
                     return
-                channel.stop()
-            sound = pygame.mixer.Sound(path)
-            channel.play(sound)
+            clip_player().play_file(path)
         except Exception:
             pass
         # Reading takes about 150 words a minute; clear the
@@ -8201,12 +8164,10 @@ class PlayerFrame(wx.Frame):
         if not self._sounds_enabled():
             return False
         outro_file = Path(__file__).parent / "sounds" / "outro.mp3"
-        if outro_file.exists():
+        if outro_file.exists() and self.player is not None:
             try:
-                import pygame
-                pygame.mixer.init()
-                pygame.mixer.music.load(str(outro_file))
-                pygame.mixer.music.play()
+                self.player.load(str(outro_file))
+                self.player.play()
                 return True
             except Exception as e:
                 print(f"Could not play outro sound: {e}")
@@ -8215,8 +8176,7 @@ class PlayerFrame(wx.Frame):
     
     def _check_outro_finished(self):
         """Check if outro is still playing, close when done"""
-        import pygame
-        if pygame.mixer.music.get_busy():
+        if self.player is not None and self.player.is_busy():
             # Still playing, check again in 100ms
             wx.CallLater(100, self._check_outro_finished)
         else:
