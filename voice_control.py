@@ -372,6 +372,21 @@ class VoiceControl:
                 text):
             return 'install_reading_voice'
 
+        # --- Install everything: Ashley, 2026-11-27.
+        # "install everything I need" / "get everything ready"
+        # — get every library the app needs, not just the
+        # reading voice, so nothing needs Command Prompt.
+        # Checked before search/play so it is not treated as
+        # a show search, and after the reading-voice check so
+        # "install my reading voice" still wins.
+        if re.search(
+                r"\b(?:install|get|set up|setup|fix)\b.*"
+                r"\b(?:everything|all (?:the )?things?|all of it)\b"
+                r"|\bget everything ready\b"
+                r"|\binstall (?:all|every) (?:requirement|update)s?\b",
+                text):
+            return 'install_requirements'
+
         # --- List shows: Ashley, 2026-11-26. "What are my
         # options?" / "tell me the list of shows I have so I
         # can choose a channel". Checked before live-TV search
