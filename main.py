@@ -335,6 +335,13 @@ _FISH_VOICES = {
     "Taylor": "cfc33da8775c47afacccf4eebabe44dc",
 }
 
+# The Voice menu's Edge option. Saving it in samantha_fish_voice
+# makes _fish_settings() find no Fish voice (it is neither a Fish
+# name nor a 32-hex id), so readings fall to the Edge reading
+# voice (samantha_reading_voice in config.ini, the voice the
+# audition picked).
+_EDGE_VOICE_OPTION = "Aria (Edge reading voice)"
+
 class PlayerFrame(wx.Frame):
     def __init__(self):
         import time
@@ -741,6 +748,26 @@ class PlayerFrame(wx.Frame):
             self.Bind(wx.EVT_MENU, self._on_livetv_refresh, lt_refresh)
             menubar.Append(livetv_menu, "&Live TV")
         
+        # Voice menu: switch Samantha's reading voice between the
+        # Fish Audio voices and the Edge reading voice. The check
+        # follows whatever config.ini says, and "Hear a Sample"
+        # reads a short line in the selected voice, so the choice
+        # can be made by ear.
+        voice_menu = wx.Menu()
+        self._voice_menu_items = {}  # {menu item id: (item, name)}
+        for _vname in _FISH_VOICES:
+            item = voice_menu.Append(wx.ID_ANY, f"{_vname} (Fish Audio)")
+            item.Bind(wx.EVT_MENU, self._on_voice_select)
+            self._voice_menu_items[item.GetId()] = (item, _vname)
+        item = voice_menu.Append(wx.ID_ANY, _EDGE_VOICE_OPTION)
+        item.Bind(wx.EVT_MENU, self._on_voice_select)
+        self._voice_menu_items[item.GetId()] = (item, _EDGE_VOICE_OPTION)
+        voice_menu.AppendSeparator()
+        voice_sample = voice_menu.Append(wx.ID_ANY, "Hear a Sample")
+        voice_sample.Bind(wx.EVT_MENU, self._on_voice_sample)
+        voice_menu.Bind(wx.EVT_MENU_OPEN, self._on_voice_menu_open)
+        menubar.Append(voice_menu, "&Voice")
+        
         self.SetMenuBar(menubar)
         
         # Main panel. Ashley, 2026-11-27: NVDA kept saying
@@ -993,6 +1020,12 @@ class PlayerFrame(wx.Frame):
         
         if self.player.is_playing:
             self.player.pause()
+            # Auto-resume: save the position right away so a crash
+            # while paused can't lose it.
+            try:
+                self._save_current_channel_state()
+            except Exception:
+                pass
             msg = ("Paused: "
                    + self._spoken_episode(
                        self.playlist.get_current_file_name()))
@@ -1132,6 +1165,11 @@ class PlayerFrame(wx.Frame):
             self._load_current_file()
             if self.player.is_playing:
                 self.player.play()
+            # Auto-resume: record the new file right away.
+            try:
+                self._save_current_channel_state(quiet=True)
+            except Exception:
+                pass
             folder = self.playlist.get_current_folder_name()
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
@@ -1150,6 +1188,11 @@ class PlayerFrame(wx.Frame):
             self._load_current_file()
             if self.player.is_playing:
                 self.player.play()
+            # Auto-resume: record the new file right away.
+            try:
+                self._save_current_channel_state(quiet=True)
+            except Exception:
+                pass
             folder = self.playlist.get_current_folder_name()
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
@@ -1165,6 +1208,11 @@ class PlayerFrame(wx.Frame):
             self._load_current_file()
             if self.player.is_playing:
                 self.player.play()
+            # Auto-resume: record the new file right away.
+            try:
+                self._save_current_channel_state(quiet=True)
+            except Exception:
+                pass
             folder = self.playlist.get_current_folder_name()
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
@@ -1180,6 +1228,11 @@ class PlayerFrame(wx.Frame):
             self._load_current_file()
             if self.player.is_playing:
                 self.player.play()
+            # Auto-resume: record the new file right away.
+            try:
+                self._save_current_channel_state(quiet=True)
+            except Exception:
+                pass
             folder = self.playlist.get_current_folder_name()
             file = self.playlist.get_current_file_name()
             new_file = f"{folder}/{file}"
@@ -1191,6 +1244,11 @@ class PlayerFrame(wx.Frame):
     def _rewind(self):
         """Rewind 10 seconds"""
         self.player.rewind(10)
+        # Auto-resume: save the new position right away.
+        try:
+            self._save_current_channel_state()
+        except Exception:
+            pass
         pos = self.player.get_position()
         minutes = int(pos // 60)
         seconds = int(pos % 60)
@@ -1201,6 +1259,11 @@ class PlayerFrame(wx.Frame):
     def _fastforward(self):
         """Fast forward 10 seconds"""
         self.player.fastforward(10)
+        # Auto-resume: save the new position right away.
+        try:
+            self._save_current_channel_state()
+        except Exception:
+            pass
         pos = self.player.get_position()
         minutes = int(pos // 60)
         seconds = int(pos % 60)
@@ -1236,19 +1299,30 @@ class PlayerFrame(wx.Frame):
         else:
             self.SetTitle("AudioVault TV")
     
-    def _save_current_channel_state(self):
-        """Save current playback state to channel"""
+    def _save_current_channel_state(self, quiet=False):
+        """Save current playback state to channel.
+
+        quiet=True is used by the high-frequency auto-saves (once per
+        second while playing, after file/folder jumps) so the debug
+        log isn't flooded; user-triggered saves (quit, channel
+        switch, pause, rewind/fast-forward) still log.
+        """
         if self.channels.current_channel and self.playlist.get_current():
             current_position = self.player.get_position()
+            if current_position < 0:
+                # Mixer reports no active music (file loaded but not
+                # started, or a brief gap): treat as the start.
+                current_position = 0
             self.channels.update_current_channel(
                 current_index=self.playlist.current_index,
                 position=current_position
             )
-            # Log what we're saving
-            minutes = int(current_position // 60)
-            seconds = int(current_position % 60)
-            file_name = self.playlist.get_current_file_name()
-            self.logger.log_channel("SAVED", self.channels.current_channel, f"File: {file_name}, Position: {minutes}:{seconds:02d}")
+            if not quiet:
+                # Log what we're saving
+                minutes = int(current_position // 60)
+                seconds = int(current_position % 60)
+                file_name = self.playlist.get_current_file_name()
+                self.logger.log_channel("SAVED", self.channels.current_channel, f"File: {file_name}, Position: {minutes}:{seconds:02d}")
     
     def _load_current_channel(self):
         """Load current channel data"""
@@ -1488,6 +1562,17 @@ class PlayerFrame(wx.Frame):
                     minutes = int(pos // 60)
                     seconds = int(pos % 60)
                     self.position_label.SetLabel(f"{minutes}:{seconds:02d}")
+                    # Auto-resume: save the position every time it
+                    # changes — once per second while playing, and
+                    # immediately after a seek (the position jumps),
+                    # so a crash or power loss loses nothing.
+                    sec = int(pos)
+                    if sec != getattr(self, "_auto_save_last_sec", None):
+                        self._auto_save_last_sec = sec
+                        try:
+                            self._save_current_channel_state(quiet=True)
+                        except Exception:
+                            pass
                 
                 # Auto-advance to next file when current finishes.
                 # Ashley, 2026-11-27: play the whole series, then
@@ -1695,7 +1780,31 @@ class PlayerFrame(wx.Frame):
             return
         
         bookmarks = self.channels.get_bookmarks()
-        if not bookmarks:
+
+        # Auto-resume: the channel's own saved position (kept updated
+        # automatically while playing) shows up first, so there is
+        # always a "go back to where I left off" entry.
+        auto_entry = None
+        auto_index = 0
+        auto_position = 0.0
+        channel_data = self.channels.get_current_channel_data()
+        if channel_data:
+            try:
+                auto_index = int(channel_data.get('current_index', 0) or 0)
+            except Exception:
+                auto_index = 0
+            try:
+                auto_position = float(channel_data.get('position', 0) or 0)
+            except Exception:
+                auto_position = 0.0
+            if (auto_index > 0 or auto_position > 0) and \
+                    0 <= auto_index < len(self.playlist.playlist):
+                file_name = Path(self.playlist.playlist[auto_index][1]).name
+                minutes = int(auto_position // 60)
+                seconds = int(auto_position % 60)
+                auto_entry = f"Auto-resume (last saved) - {file_name} ({minutes}:{seconds:02d})"
+
+        if not bookmarks and not auto_entry:
             msg = "No bookmarks in this channel"
             wx.MessageBox(msg, "No Bookmarks", wx.OK | wx.ICON_INFORMATION)
             speak(msg)
@@ -1703,6 +1812,8 @@ class PlayerFrame(wx.Frame):
         
         # Create list with bookmark info
         bookmark_list = []
+        if auto_entry:
+            bookmark_list.append(auto_entry)
         for name in sorted(bookmarks.keys()):
             bm = bookmarks[name]
             # Get file name if possible
@@ -1720,8 +1831,44 @@ class PlayerFrame(wx.Frame):
         
         if dlg.ShowModal() == wx.ID_OK:
             selection_index = dlg.GetSelection()
-            selected_name = sorted(bookmarks.keys())[selection_index]
             dlg.Destroy()
+
+            if auto_entry and selection_index == 0:
+                # Auto-resume: jump only (it is the channel's saved
+                # position, not a named bookmark, so there is nothing
+                # to delete).
+                result = wx.MessageBox(
+                    "Jump to your last saved position?",
+                    "Auto-Resume",
+                    wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION
+                )
+                if result == wx.YES:
+                    was_playing = self.player.is_playing
+                    self.player.stop()
+                    self.player.is_playing = False
+
+                    if len(self.playlist.playlist) > 0:
+                        idx = max(0, min(auto_index, len(self.playlist.playlist) - 1))
+                        if self.playlist.set_index(idx):
+                            self._load_current_file()
+                            self.player.paused_position = auto_position
+                            self._update_display()
+
+                            if was_playing:
+                                self.player.unpause()
+
+                            file_name = self.playlist.get_current_file_name()
+                            folder_name = self.playlist.get_current_folder_name()
+                            self.logger.log_bookmark("JUMP", "auto-resume", f"to {folder_name}/{file_name}")
+
+                            msg = "Jumped to your last saved position"
+                            self.status_label.SetLabel(msg)
+                            speak(msg)
+                        else:
+                            wx.MessageBox("Saved file no longer exists", "Error", wx.OK | wx.ICON_ERROR)
+                return
+
+            selected_name = sorted(bookmarks.keys())[selection_index - (1 if auto_entry else 0)]
             
             # Ask if they want to jump or delete
             result = wx.MessageBox(
@@ -6158,6 +6305,76 @@ class PlayerFrame(wx.Frame):
                    "Tell me which one you want to watch.")
         self.status_label.SetLabel(msg)
         self._say_in_samantha_voice(msg)
+
+    def _current_reading_voice_name(self):
+        """The voice name the Voice menu should show checked.
+
+        Whatever config.ini says for samantha_fish_voice, the
+        Fish name it holds, or the Edge option when the stored
+        value is not a Fish voice.
+        """
+        import configparser
+        try:
+            config = configparser.ConfigParser()
+            config_path = Path(__file__).parent / "config.ini"
+            config.read(config_path)
+            voice = config.get("settings", "samantha_fish_voice",
+                               fallback="Ariana Grande").strip()
+        except Exception:
+            voice = "Ariana Grande"
+        if voice in _FISH_VOICES:
+            return voice
+        return _EDGE_VOICE_OPTION
+
+    def _set_reading_voice(self, name):
+        """Save the chosen reading voice in config.ini."""
+        import configparser
+        config = configparser.ConfigParser()
+        config_path = Path(__file__).parent / "config.ini"
+        config.read(config_path)
+        if not config.has_section("settings"):
+            config["settings"] = {}
+        config.set("settings", "samantha_fish_voice", name)
+        with open(config_path, "w") as f:
+            config.write(f)
+        # The mode may have changed (fish <-> edge): re-evaluate
+        # it on the next reading instead of trusting the cache.
+        self._samantha_voice_mode_cache = "unset"
+
+    def _update_voice_menu_checks(self):
+        """Put the check on the voice config.ini currently uses."""
+        selected = self._current_reading_voice_name()
+        for item, name in self._voice_menu_items.values():
+            item.Check(name == selected)
+
+    def _on_voice_menu_open(self, event):
+        self._update_voice_menu_checks()
+
+    def _on_voice_select(self, event):
+        """A Fish or Edge voice was picked from the Voice menu."""
+        item_and_name = self._voice_menu_items.get(event.GetId())
+        if item_and_name is None:
+            return
+        name = item_and_name[1]
+        self._set_reading_voice(name)
+        self._update_voice_menu_checks()
+        has_key = self._fish_settings()[0] is not None
+        if name == _EDGE_VOICE_OPTION:
+            msg = "Reading voice: Aria, the Edge reading voice."
+        elif has_key:
+            msg = f"Reading voice: {name}."
+        else:
+            msg = (f"{name} is saved, but no Fish Audio key was "
+                   "found, so I will read with the Edge voice for now.")
+        self.status_label.SetLabel(msg)
+        self._answer_in_samantha_voice(msg)
+
+    def _on_voice_sample(self, event):
+        """Read a short line in the currently selected voice."""
+        selected = self._current_reading_voice_name()
+        self._say_in_samantha_voice(
+            f"Hi. This is my reading voice, {selected}. "
+            "Let me know if you like it.")
 
     def _fish_settings(self):
         """(api_key, reference_id) for Fish Audio, or (None, None).
