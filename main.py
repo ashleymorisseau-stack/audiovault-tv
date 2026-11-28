@@ -756,15 +756,22 @@ class PlayerFrame(wx.Frame):
         voice_menu = wx.Menu()
         self._voice_menu_items = {}  # {menu item id: (item, name)}
         for _vname in _FISH_VOICES:
-            item = voice_menu.Append(wx.ID_ANY, f"{_vname} (Fish Audio)")
-            item.Bind(wx.EVT_MENU, self._on_voice_select)
+            # wx.ITEM_CHECK makes the item checkable, so the menu can
+            # put a tick on the voice config.ini currently uses. Without
+            # it, Check() trips a C++ assertion on Windows.
+            item = voice_menu.Append(wx.ID_ANY, f"{_vname} (Fish Audio)",
+                                     wx.ITEM_CHECK)
+            # wx.MenuItem is not a window, so it has no Bind. Bind on
+            # the frame with the item as scope, like the other menus
+            # in this file; the handler picks the item by event id.
+            self.Bind(wx.EVT_MENU, self._on_voice_select, item)
             self._voice_menu_items[item.GetId()] = (item, _vname)
-        item = voice_menu.Append(wx.ID_ANY, _EDGE_VOICE_OPTION)
-        item.Bind(wx.EVT_MENU, self._on_voice_select)
+        item = voice_menu.Append(wx.ID_ANY, _EDGE_VOICE_OPTION, wx.ITEM_CHECK)
+        self.Bind(wx.EVT_MENU, self._on_voice_select, item)
         self._voice_menu_items[item.GetId()] = (item, _EDGE_VOICE_OPTION)
         voice_menu.AppendSeparator()
         voice_sample = voice_menu.Append(wx.ID_ANY, "Hear a Sample")
-        voice_sample.Bind(wx.EVT_MENU, self._on_voice_sample)
+        self.Bind(wx.EVT_MENU, self._on_voice_sample, voice_sample)
         voice_menu.Bind(wx.EVT_MENU_OPEN, self._on_voice_menu_open)
         menubar.Append(voice_menu, "&Voice")
         
