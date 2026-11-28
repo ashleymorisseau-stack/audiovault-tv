@@ -322,6 +322,19 @@ _VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.
 _VOSK_MODEL_MIN_FREE_BYTES = 200_000_000
 
 
+# Ashley, 2026-11-28: the Fish Audio voices her Samantha can use,
+# by the names they appear in her NVDA fishy settings (custom
+# voices) or in Fish Audio's free built-in list. The reference
+# ids are 32-hex; a raw id pasted into config.ini works too.
+_FISH_VOICES = {
+    "Ariana Grande": "0c793bf68b534d168357c09a50e9b423",
+    "Dolly Pardon": "234e60f891c1414dabf5737c98190e1c",
+    "Josh": "f13958f6a0424bc7b3ea18a209bd0910",
+    "Sarah": "933563129e564b19a115bedd57b7406a",
+    "Selene": "b347db033a6549378b48d00acb0d06cd",
+    "Taylor": "cfc33da8775c47afacccf4eebabe44dc",
+}
+
 class PlayerFrame(wx.Frame):
     def __init__(self):
         import time
@@ -569,6 +582,14 @@ class PlayerFrame(wx.Frame):
         # says "pane". Put it in the "Type to Samantha" box
         # instead, once quiet mode has had a moment to engage.
         wx.CallLater(1200, self._focus_command_box_if_on_panel)
+        # Ashley, 2026-11-28: "make it so NVDA does not say pain
+        # [pane] every time the program loads". The focus move
+        # above happens too late: NVDA is still awake when the
+        # window first takes focus (quiet mode's keypress lands
+        # at about 800 ms), so it announces the panel, "pane",
+        # before quiet mode can engage. Keep the first second
+        # quiet instead — see _quiet_nvda_startup.
+        wx.CallLater(50, self._quiet_nvda_startup)
     
     def _create_ui(self):
         """Create accessible UI with menu bar"""
@@ -2425,6 +2446,48 @@ class PlayerFrame(wx.Frame):
             # goes to _voice_no_command instead, so "Excuse
             # me, I didn't understand" is never said for
             # nothing at all.
+            # Ashley, 2026-11-28: after the list she says the
+            # show she wants — "Doctor Who", "I want Friends" —
+            # without the word "play", which matches no command
+            # and reaches here. Match it against her channels
+            # the same way play_channel does (exact, then
+            # starts-with, then fuzzy), and play it, instead
+            # of "Excuse me".
+            import re
+            intent = re.compile(
+                r"^(?:i want|i would like|i'd like|i am going to watch"
+                r"|i'm going to watch|i want to (?:watch|play)|let's watch"
+                r"|lets watch|i'll watch|can you play (?:me )?watch)\s+")
+            candidate = str(text).strip().lower()
+            said_intent = bool(intent.match(candidate))
+            candidate = intent.sub("", candidate)
+            found = (self._find_local_channel(candidate)
+                     if len(candidate) >= 3 else None)
+            if (found is None and said_intent
+                    and len(candidate.split()) <= 4):
+                # She named a specific show she does not have —
+                # say so plainly, the same way "play X" does.
+                msg = (f"You don't have a channel called {candidate}, "
+                       "so I didn't change anything.")
+                self.status_label.SetLabel(msg)
+                self._speak_and_requiet(
+                    lambda: self._say_in_samantha_voice(msg))
+                return
+            if found:
+                self._switch_to_channel(found)
+                if self.playlist.get_current():
+                    self.player.play()
+                    msg = ("You have " + found + ". Now playing: "
+                           + self._spoken_episode(
+                               self.playlist.get_current_file_name(),
+                               found) + ".")
+                else:
+                    msg = (f"You have {found}, but there is "
+                           "nothing to play.")
+                self.status_label.SetLabel(msg)
+                self._speak_and_requiet(
+                    lambda: self._say_in_samantha_voice(msg))
+                return
             msg = (f"Excuse me, I didn't understand {text}. "
                    "I heard " + str(text) + ". "
                    "Try saying, list shows, or play Doctor Who.")
@@ -2738,6 +2801,45 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         speak(msg)
 
+    def _cancel_nvda_speech_once(self):
+        """Cancel whatever NVDA is saying (NVDA speech only).
+
+        Never touches Samantha's own voice or the shows: those
+        play through the audio engine, not NVDA.
+        """
+        if _NVDA_QUIET:
+            return
+        try:
+            if NVDA_AVAILABLE and nvda:
+                nvda.nvdaController_cancelSpeech()
+        except Exception:
+            pass
+
+    def _quiet_nvda_startup(self, _tick=0):
+        """Keep the first second after launch quiet.
+
+        Ashley, 2026-11-28: "make it so NVDA does not say pain
+        every time the program loads". At launch, focus lands on
+        the unnamed main panel, and NVDA — still awake, because
+        quiet mode's keypress has not landed yet — announces the
+        panel's role, "pane" (she hears "pain"). Two things cover
+        the gap before quiet mode engages: focus is moved to the
+        named "Type to Samantha" box as early as it can, and
+        whatever NVDA is saying in that first second is
+        cancelled. Ticks about eight times at 120 ms, and stops
+        the moment quiet mode is on, because then NVDA is asleep
+        and there is nothing left to cancel.
+        """
+        if _NVDA_QUIET or not NVDA_AVAILABLE:
+            return
+        try:
+            self._focus_command_box_if_on_panel()
+            self._cancel_nvda_speech_once()
+        except Exception:
+            pass
+        if _tick < 8:
+            wx.CallLater(120, self._quiet_nvda_startup, _tick + 1)
+
     def _enable_nvda_quiet(self, _retry=0):
         """Quiet NVDA for this app after the window opens.
 
@@ -2865,6 +2967,15 @@ class PlayerFrame(wx.Frame):
             if event.GetActive():
                 self._enable_nvda_quiet()
                 self._focus_command_box_if_on_panel()
+                # Ashley, 2026-11-28: if quiet mode should be on
+                # but has not engaged yet (first launch, or after
+                # a Windows/NVDA restart), cancel whatever NVDA is
+                # saying about this window, so "pane" does not come
+                # back when she returns to it. Skipped while she
+                # has quiet mode turned off herself.
+                if (getattr(self, "_nvda_quiet_wanted", True)
+                        and not _NVDA_QUIET and NVDA_AVAILABLE):
+                    wx.CallLater(120, self._cancel_nvda_speech_once)
             event.Skip()
         except Exception:
             pass
@@ -3428,17 +3539,16 @@ class PlayerFrame(wx.Frame):
         wx.CallLater(greeting_ms + 300, self._listen_after_greeting)
 
     def _startup_show_list(self):
-        """Startup step 3: name the channels she has, then listen.
+        """Startup step 3: read the shows, then let her pick one.
 
         Used when she said nothing after the greeting: the list
-        is read so she still hears her options, and then
-        Samantha listens again so she can pick one.
+        is read so she still hears her options, and Samantha
+        then listens for the show she wants, so she can just say
+        it (see _start_selection_listening).
         """
         self._startup_list_pending = False
         self._speak_and_requiet(self._speak_show_list)
-        words = len(str(self.status_label.GetLabel()).split())
-        ms = int((words / 2.5 + 8) * 1000)
-        wx.CallLater(ms, self._listen_after_greeting)
+        self._start_selection_listening()
 
     def _listen_after_greeting(self):
         """After the startup greeting: do NOT start listening.
@@ -3464,6 +3574,30 @@ class PlayerFrame(wx.Frame):
             return
         return
     
+    def _start_selection_listening(self, _waited_ms=0):
+        """After the list: open the mic so she can just say it.
+
+        Ashley, 2026-11-28: "before it plays it should let me
+        select the shows I want ... or let me tell it what I
+        want". At this moment nothing is playing yet — she is
+        still choosing — so listening here is safe, which is
+        exactly the one moment the press-to-talk rule
+        (2026-11-27) does not block: the microphone opens
+        before any show sound, the one-time window ends with
+        her command or after 20 seconds of silence, and it
+        never re-arms, so a show playing afterwards is never
+        heard as a command. Waits until Samantha has finished
+        every reading (the list, the guide) — up to two
+        minutes — so the microphone is never open while she
+        is still talking.
+        """
+        if (getattr(self, "_samantha_reading", False)
+                or self._samantha_busy()) and _waited_ms < 120000:
+            wx.CallLater(1000, self._start_selection_listening,
+                         _waited_ms + 1000)
+            return
+        self._start_listening(chimes=False)
+
     def _ask_channel_to_play(self, prompt_message):
         """Ask which channel to play"""
         channels = self.channels.get_channel_list()
@@ -6025,6 +6159,81 @@ class PlayerFrame(wx.Frame):
         self.status_label.SetLabel(msg)
         self._say_in_samantha_voice(msg)
 
+    def _fish_settings(self):
+        """(api_key, reference_id) for Fish Audio, or (None, None).
+
+        Ashley, 2026-11-28: she wants the reading voice to be the
+        same Fish Audio voice that greets her, not Edge TTS's
+        Aria. The API key already lives in her NVDA fishy
+        settings (the fishy addon she uses for NVDA's own
+        speech), so it is read from there first — she has to
+        type nothing. Fallback: config.ini fish_api_key. The
+        voice name (or a raw 32-hex reference id) comes from
+        config.ini samantha_fish_voice, defaulting to the
+        custom "Ariana Grande" voice, the one closest to her
+        recording in pitch (measured 2026-11-28).
+        """
+        import configparser
+        import re
+        key = None
+        try:
+            nvda_cfg = (Path.home() / "AppData" / "Roaming" / "NVDA"
+                        / "fishy" / "settings.json")
+            if nvda_cfg.exists():
+                key = str(json.load(open(nvda_cfg))
+                          .get("api_key", "")).strip() or None
+        except Exception:
+            pass
+        try:
+            config = configparser.ConfigParser()
+            config_path = Path(__file__).parent / "config.ini"
+            config.read(config_path)
+            if not key:
+                key = config.get("settings", "fish_api_key",
+                                 fallback="").strip() or None
+            voice = config.get("settings", "samantha_fish_voice",
+                               fallback="Ariana Grande").strip()
+        except Exception:
+            voice = "Ariana Grande"
+        if not key:
+            return None, None
+        ref = _FISH_VOICES.get(voice)
+        if ref is None and re.fullmatch(r"[0-9a-f]{32}", voice.lower()):
+            # A raw reference id, not a name — use it directly.
+            ref = voice.lower()
+        if ref is None:
+            return None, None
+        return key, ref
+
+    def _fish_synthesize(self, key, ref_id, text, out_mp3):
+        """One Fish Audio TTS request (stdlib urllib).
+
+        The same call the fishy NVDA addon makes
+        (api.fish.audio/v1/tts, s2.1-pro-free). MP3 only
+        supports 32000 or 44100 Hz — 24000 (the addon's PCM
+        rate) is rejected for MP3, which is why it is 32000
+        here. soundfile decodes the MP3 in the player.
+        """
+        import urllib.request
+        payload = json.dumps({
+            "text": text,
+            "reference_id": ref_id,
+            "format": "mp3",
+            "sample_rate": 32000,
+            "prosody": {"speed": 1, "volume": 0},
+            "latency": "balanced",
+            "chunk_length": 150,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.fish.audio/v1/tts", data=payload,
+            headers={
+                "Authorization": "Bearer " + key,
+                "Content-Type": "application/json",
+                "model": "s2.1-pro-free",
+            }, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as r:
+            open(out_mp3, "wb").write(r.read())
+
     def _samantha_voice_mode(self):
         """Which voice can read dynamic text out loud, if any.
 
@@ -6032,28 +6241,43 @@ class PlayerFrame(wx.Frame):
         shows. I don't want NVDA reading that list of shows.
         I want her to." Samantha's recorded voice cannot read
         show names she never recorded, so dynamic text needs
-        a reading voice that can say any words. There is
-        exactly one reading voice, and it is NOT Microsoft:
-        - "edge": the edge-tts library is installed, so text
-          is spoken with a warm female neural voice
-          (en-US-AriaNeural) over the internet. The app tries
-          to install edge-tts itself on startup (see
-          _ensure_edge_tts), so this becomes available
-          without her doing anything.
-        - None: edge-tts is not installed yet; readings fall
-          back to NVDA speak(), as before, until the install
-          succeeds. Microsoft's own built-in speech was tried
-          once and is GONE — Ashley said "I didn't tell you to add Microsoft" and "I don't like
-          Microsoft Sierra", so it is never used, not even as
-          a fallback.
-        Only a working reading voice is cached. Honest note:
-        Ashley has not heard the Aria reading voice yet — no
-        sample could be made from here — so if she does not like
-        it, the voice name is the one line to change.
+        a reading voice that can say any words. Two sources,
+        in priority order, and it is NEVER Microsoft:
+        - "fish": the Fish Audio voice — the SAME voice that
+          greets her (Ashley, 2026-11-28: "the same voice that
+          greets me should read the list"). No install needed:
+          ready the moment the app opens, with her API key
+          read from her NVDA fishy settings and the voice set
+          in config.ini (samantha_fish_voice, see
+          _fish_settings). When a Fish call fails, that one
+          reading falls back to edge (see _fish_tts_read).
+        - "edge": the edge-tts library is installed (vendored
+          with the app), so text is spoken with the Edge
+          reading voice over the internet. Voice and pitch in
+          config.ini (samantha_reading_voice /
+          samantha_reading_pitch, see _reading_voice). Used
+          when Fish is not configured, or as the fallback for
+          a failed Fish call.
+        - None: neither is available (no Fish key and edge-tts
+          not installed yet); readings fall back to the
+          "not ready" flow, as before, until edge installs.
+        Microsoft's own built-in speech was tried once and is
+        GONE — Ashley said "I didn't tell you to add Microsoft"
+        and "I don't like Microsoft Sierra", so it is never
+        used, not even as a fallback. Only a working reading
+        voice is cached.
         """
         cached = getattr(self, "_samantha_voice_mode_cache", "unset")
-        if cached == "edge":
-            return "edge"
+        if cached == "fish" or cached == "edge":
+            return cached
+        # Ashley, 2026-11-28: the Fish Audio voice (the same
+        # voice that greets her) wins when it is configured —
+        # no install needed, it is ready the moment the app
+        # opens. Nothing configured falls through to the edge
+        # logic below, exactly as before.
+        if self._fish_settings()[1] is not None:
+            self._samantha_voice_mode_cache = "fish"
+            return "fish"
         # Ashley, 2026-11-26: "not ready" must never be cached
         # for the whole run. The old code cached None too, so
         # once the voice was missing at the first ask, every ask
@@ -6160,14 +6384,16 @@ class PlayerFrame(wx.Frame):
         if not text:
             return
         mode = self._samantha_voice_mode()
-        if mode == "edge":
+        if mode in ("fish", "edge"):
             # Set the flag here, on the main thread, before the
             # synthesis thread starts: the old code only set it
             # inside the thread, so a check a moment later (the
             # guide waiting for the list, listening re-arming)
             # could see it clear and talk over the reading.
             self._samantha_reading = True
-            threading.Thread(target=self._edge_tts_read,
+            target = (self._fish_tts_read
+                      if mode == "fish" else self._edge_tts_read)
+            threading.Thread(target=target,
                              args=(text,), daemon=True).start()
             return
         # No reading voice yet. Never NVDA, never Microsoft.
@@ -6231,11 +6457,97 @@ class PlayerFrame(wx.Frame):
         else:
             wx.CallLater(1000, self._clear_samantha_reading)
 
+    def _reading_voice(self):
+        """(voice, pitch) Samantha's reading voice uses.
+
+        Ashley, 2026-11-27: she wants the voice that greets her
+        (her recorded voice) to be the same voice that reads
+        the channel list. The recordings are around 340 Hz
+        pitch; the Edge voices are around 200-220 Hz, so the
+        reading voice is picked to sound as much like the
+        recording as possible, with a pitch lift if needed.
+        Whatever she picks after listening to the audition
+        file (Samantha_reading_voice_audition.wav) goes here,
+        in config.ini, so it can be changed without touching
+        code:
+            [settings]
+            samantha_reading_voice = en-US-AriaNeural
+            samantha_reading_pitch = +100Hz
+        With no settings, the voice is today's default,
+        en-US-AriaNeural at normal pitch. Only one reading
+        voice at a time — never NVDA, never Microsoft.
+        """
+        import configparser
+        import re
+        voice = "en-US-AriaNeural"
+        pitch = "+0Hz"
+        try:
+            config = configparser.ConfigParser()
+            config_path = Path(__file__).parent / "config.ini"
+            config.read(config_path)
+            voice = config.get("settings", "samantha_reading_voice",
+                               fallback=voice).strip() or voice
+            pitch = config.get("settings", "samantha_reading_pitch",
+                               fallback=pitch).strip()
+            # Edge TTS wants exactly "+10Hz" / "-20Hz"; anything
+            # else makes the whole synthesis fail, so an
+            # unrecognisable setting means "normal pitch".
+            if not re.match(r"^[+-]\d+Hz$", pitch):
+                pitch = "+0Hz"
+        except Exception:
+            pass
+        return voice, pitch
+
+    def _fish_tts_read(self, text):
+        """Synthesize text with Fish Audio and play it (thread).
+
+        Mirror of _edge_tts_read for the Fish Audio voice.
+        Tries twice (a slow internet moment fails once and
+        works seconds later). When Fish really fails, this
+        one reading falls back to the edge reading so the
+        list is always read — the bad day costs the voice,
+        not the list.
+        """
+        try:
+            key, ref = self._fish_settings()
+            if not key:
+                raise RuntimeError("no Fish Audio API key")
+            path = str(Path(tempfile.gettempdir())
+                       / f"samantha_read_{int(time.time() * 1000) % 100000}.mp3")
+            self._samantha_reading = True
+            last_error = None
+            for _attempt in (1, 2):
+                try:
+                    self._fish_synthesize(key, ref, text, path)
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    time.sleep(3)
+            if last_error is not None:
+                raise last_error
+            for _ in range(40):
+                if not self._samantha_busy():
+                    break
+                time.sleep(0.2)
+            words = len(str(text).split())
+            wx.CallAfter(self._play_dynamic_wav, path, words)
+        except Exception as e:
+            try:
+                self.logger.log_error(
+                    "FISH TTS read failed: " + str(e)[:200])
+            except Exception:
+                pass
+            # One reading in the backup voice, so the list is
+            # still read (see _edge_tts_read's own fallback).
+            self._edge_tts_read(text)
+
     def _edge_tts_read(self, text):
         """Synthesize text with Edge TTS and play it (thread)."""
         try:
             import asyncio
             import edge_tts
+            voice, pitch = self._reading_voice()
             path = str(Path(tempfile.gettempdir())
                        / f"samantha_read_{int(time.time() * 1000) % 100000}.mp3")
             self._samantha_reading = True
@@ -6247,7 +6559,8 @@ class PlayerFrame(wx.Frame):
             for _attempt in (1, 2):
                 try:
                     asyncio.run(
-                        edge_tts.Communicate(text, "en-US-AriaNeural").save(path))
+                        edge_tts.Communicate(text, voice,
+                                             pitch=pitch).save(path))
                     last_error = None
                     break
                 except Exception as e:
@@ -6655,7 +6968,11 @@ class PlayerFrame(wx.Frame):
             self._edge_install_state = "checking"
             if self._edge_import_ok():
                 self._edge_install_state = "ready"
-                self._samantha_voice_mode_cache = "edge"
+                # Ashley, 2026-11-28: when the Fish Audio voice
+                # is configured, edge is only the backup, so
+                # the reading voice must not flip to edge.
+                if self._samantha_voice_mode_cache != "fish":
+                    self._samantha_voice_mode_cache = "edge"
                 # Vendored (shipped with the app) or pip: the
                 # diagnostic says which, and a past failure's
                 # reason is cleared now the voice is ready.
@@ -6680,7 +6997,10 @@ class PlayerFrame(wx.Frame):
                 pip_ok = pip_ok2
             if pip_ok and self._edge_import_ok(force_recheck=True):
                 self._edge_install_state = "ready"
-                self._samantha_voice_mode_cache = "edge"
+                # Fish, when configured, stays the reading
+                # voice — edge here is the backup only.
+                if self._samantha_voice_mode_cache != "fish":
+                    self._samantha_voice_mode_cache = "edge"
                 self._edge_install_source = "pip"
                 self._edge_install_last_reason = None
                 self._edge_install_started_announced = False
@@ -6773,6 +7093,13 @@ class PlayerFrame(wx.Frame):
         if pending:
             self._say_in_samantha_voice(pending)
             return
+        # Ashley, 2026-11-28: with the Fish Audio voice
+        # configured, the reading voice is ready the moment
+        # the app opens — nothing was installed for it, so
+        # announcing "the reading voice is ready" about the
+        # backup voice (edge) would only be confusing.
+        if self._samantha_voice_mode() == "fish":
+            return
         self._say_in_samantha_voice(
             "My reading voice is ready now. "
             "Ask me to list your shows.")
@@ -6839,6 +7166,14 @@ class PlayerFrame(wx.Frame):
         be read back to her. When the voice is up, she hears
         the whole reason spoken.
         """
+        # Ashley, 2026-11-28: with the Fish Audio voice
+        # configured there is no install to diagnose — the
+        # voice is ready the moment the app opens.
+        if self._samantha_voice_mode() == "fish":
+            self._say_in_samantha_voice(
+                "My reading voice is ready. It is the Fish "
+                "Audio voice.")
+            return
         state = getattr(self, "_edge_install_state", "unknown")
         reason = getattr(self, "_edge_install_last_reason", None)
         req_reasons = getattr(self, "_requirements_last_reason", {}) or {}
@@ -7882,36 +8217,26 @@ class PlayerFrame(wx.Frame):
 
         Ashley, 2026-11-26: "tell me the list of shows that
         I have so that I can choose a channel" / "What are
-        my options?" The shows are the distinct show names
-        in all her channels — Friends, Classic Doctor Who,
-        Two and a Half Men, Frasier, and so on — not just
-        channel names, because a channel can hold a show
-        under a slightly different name. The names change
-        as she adds shows, so they are read in Samantha's
-        reading voice (see _say_in_samantha_voice), not
-        NVDA's. After the list, she can say the show she
-        wants, for example "play Friends".
+        my options?". Ashley, 2026-11-28: the shows are her
+        channel names. Her library is named after episodes,
+        not shows — "01 Ruby Reborn.mp3", "[S01.E01] Glen
+        Godwin...mp3", "An Unearthly Child 01 An Unearthly
+        Child.mp3" — so the old code (a show name from every
+        file name) came out with 1,795 "shows" for her 20
+        channels. A channel is a show: she makes one channel
+        per show and calls them by those names, so the list
+        is the channel names — the same names she hears in
+        "list channels" — read in Samantha's reading voice
+        (see _say_in_samantha_voice), not NVDA's. After the
+        list, she can say the show she wants, for example
+        "play Friends".
         """
-        seen = {}
-        for name in self.channels.get_channel_list():
-            for fn in self._channel_file_names(name):
-                base = self._show_base(fn)
-                if not base:
-                    continue
-                # Clean show name only. fn is a full file path, and
-                # splitting it on " - " used to return the whole
-                # path — "C:\Users\Ashley M\audio TV\Classic
-                # Doctor Who\Classic Doctor Who" — which Samantha
-                # then read out, backslashes and all.
-                display = self._spoken_show(fn)
-                if not display:
-                    continue
-                seen[base] = display
-        shows = [seen[k] for k in sorted(seen)]
-        if not shows:
-            msg = "No shows available. Press Ctrl+T to create a channel."
+        channels = self.channels.get_channel_list()
+        if not channels:
+            msg = "No shows available. Press Ctrl+T to create one."
         else:
-            msg = (f"Here are the shows you have: {', '.join(shows)}. "
+            names = ", ".join(channels)
+            msg = (f"Here are the shows you have: {names}. "
                    "Tell me which one you want to watch.")
         self.status_label.SetLabel(msg)
         self._say_in_samantha_voice(msg)
@@ -7929,6 +8254,11 @@ class PlayerFrame(wx.Frame):
         """
         self._speak_show_list()
         wx.CallLater(500, self._speak_tv_guide_when_free)
+        # Ashley, 2026-11-28: once the list and the guide have
+        # been read, she picks the show she wants by saying it
+        # (see _start_selection_listening) — it waits for both
+        # readings to finish before the microphone opens.
+        wx.CallLater(500, self._start_selection_listening)
 
     def _speak_tv_guide_when_free(self, _waited_ms=0):
         """Read the TV guide once Samantha has finished the list.

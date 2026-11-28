@@ -125,8 +125,11 @@ def _normalise_heard(text):
     text = re.sub(r"\s+", " ", text.lower().strip())
     # "list me shows" / "list my shows" -> "list shows".
     text = re.sub(r"\blist (?:me|my)\b", "list", text)
-    # "least shows" is Vosk for "list shows".
-    text = re.sub(r"\bleast (?:the |all )?(shows?|channels?)\b",
+    # "least shows" is Vosk for "list shows". Ashley, 2026-11-28:
+    # "less the shows" is the same mishearing in wake-word mode
+    # ("Sammy, list the shows I have" came through as "less the
+    # shows i have"), so it folds back the same way.
+    text = re.sub(r"\b(?:least|less) (?:the |all )?(shows?|channels?)\b",
                   r"list \1", text)
     # "doctor hugh / hue / hoo" -> "doctor who".
     text = re.sub(r"\bdoctor (?:hugh|hue|hoo|whoo)\b", "doctor who", text)

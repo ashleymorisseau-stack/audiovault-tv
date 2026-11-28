@@ -79,7 +79,15 @@ The channel names, and the show names in the guide, change as you add channels, 
 
 ## List of Shows — "What Are My Options?"
 
-Ask Samantha, by voice, "What are my options?" or "tell me the list of shows I have", and she reads out all the shows you have — Friends, Classic Doctor Who, Two and a Half Men, Frasier, and so on — so you can choose a channel by the show you want. Then tell her the show, for example "play Friends", and she will take you there. The show names change as you add shows, so they are read in the app's usual speaking voice, the same pattern as the TV guide.
+Ask Samantha, by voice, "What are my options?" or "tell me the list of shows I have", and she reads out all the shows you have — one name per channel, in the order they are sorted — so you can choose the show you want. A channel is a show: your library is named after episodes ("01 Ruby Reborn.mp3"), so the list comes from your channel names, the same names she reads for "list channels". After the list she says "I'm listening" and waits — you just say the show you want, for example "Doctor Who" or "I want Two and a Half Men" — no "play" needed, and she takes you there. The names change as you add channels, so they are read in Samantha's reading voice, the same pattern as the TV guide.
+
+After the list, three things all work the same way:
+
+- Say the show by name only — "Doctor Who", "corner gas" — and it plays.
+- Say "I want ...", "let's watch ...", "I'm going to watch ..." and it plays.
+- Say "play ..." like before — unchanged.
+
+If you name a show you do not have ("I want Friends"), she says plainly "You don't have a channel called Friends, so I didn't change anything."
 
 | Say This | Action |
 |----------|--------|
@@ -125,7 +133,7 @@ There is no Command Prompt step for any of this any more. No NVDA or Microsoft v
 
 ## "I'm Good" — Answer Her After You Press B (or in Wake-Word Mode)
 
-When Samantha greets you at startup and asks how you are doing, she does NOT start listening by herself — she waits for you to press a button (see "How to Talk to Samantha" above), because listening by itself was hearing the show and cutting it off. So to answer her: press **Ctrl+Shift+B** and say "I'm good", or press **Ctrl+Shift+W** and say "Samantha, I'm good". After her recorded reply ("That's wonderful! I'm so glad you're doing good."), she reads your shows and what's coming up next. That list and guide are read in Samantha's own reading voice, never NVDA — NVDA stays quiet for all of it.
+When Samantha greets you at startup and asks how you are doing, she does NOT start listening by herself — she waits for you to press a button (see "How to Talk to Samantha" above), because listening by itself was hearing the show and cutting it off. So to answer her: press **Ctrl+Shift+B** and say "I'm good", or press **Ctrl+Shift+W** and say "Samantha, I'm good". After her recorded reply ("That's wonderful! I'm so glad you're doing good."), she reads your shows and what's coming up next. That list and guide are read in Samantha's own reading voice, never NVDA — NVDA stays quiet for all of it. Then, once every reading has finished, she says "I'm listening" and opens the microphone for one turn: you just say the show you want ("Doctor Who") and it plays. Nothing is playing at that moment — you are still choosing — which is why listening here is safe, and the turn ends with your command or after 20 seconds of silence and never re-arms, so a show playing afterwards is never heard as a command. If you said nothing, she says "Excuse me, I didn't hear you" once; press B again any time.
 
 ## Startup — What Samantha Says When the App Opens
 
@@ -157,7 +165,7 @@ There is no Command Prompt step for this any more. If the install keeps failing 
 
 One voice at a time: a reading now waits for any Samantha recording that is still playing ("I'm on it", the guide intro, the greeting) to finish before it starts, and listening waits while Samantha is reading, so nothing talks over her and she is never heard as her own command.
 
-One honest note: you have not heard the Aria reading voice yet — no sample of one could be made from here — so if you do not like how it sounds, say so and the voice will be changed. It is one line in the code.
+One honest note: the reading voice is now the same Fish Audio voice that greets you, not a different neural voice. Samantha reads the list of channels, the list of shows, and the TV guide in your chosen Fish Audio voice — the one that says "Hi, my name is Samantha." The app calls Fish Audio over the internet (the same `api.fish.audio` your NVDA "fishy" add-on uses) with your API key, which it reads from your NVDA fishy settings automatically, so you do not type anything. The voice itself is set in `config.ini` — `samantha_fish_voice` — and the default is the custom "Ariana Grande" voice, the one measured closest to the greeting in pitch. If a Fish Audio call fails (no internet), that one reading falls back to the Edge TTS voice so the list is still read; the bad day costs the voice, not the list. To try the voices, an audition is ready: `voice_samples/Fish_voice_audition.wav` plays the real recording first, then each Fish Audio voice reading the channel-list line, so you can hear which one you want and tell me the name.
 
 ## The App Installs Everything It Needs Itself — No Command Prompt
 
